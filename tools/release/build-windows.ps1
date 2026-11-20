@@ -21,8 +21,16 @@ $flags = foreach ($entry in $buildPaths) {
 Push-Location -LiteralPath $root
 try {
     $env:CARGO_ENCODED_RUSTFLAGS = $flags -join [char]31
-    npm.cmd run tauri build -- --target $platform
-    if ($LASTEXITCODE -ne 0) { throw "Tauri build failed with exit code $LASTEXITCODE." }
+    # Windows PowerShell can turn normal Tauri diagnostics on stderr into error records.
+    $previousErrorAction = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        npm.cmd run tauri build -- --target $platform
+        $buildCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
+    if ($buildCode -ne 0) { throw "Tauri build failed with exit code $buildCode." }
 
     $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { 'src-tauri/target' }
     $name = "Margin_$($config.version)_x64-setup.exe"
