@@ -30,7 +30,7 @@ npm ci
 npm run tauri dev
 ```
 
-Run `npm run tauri build` to create the Windows installer in `src-tauri/target/release/bundle/nsis`. Run `npx vitest run` and `cargo test --manifest-path src-tauri/Cargo.toml --locked` for the frontend and core tests.
+Run `npm run tauri build` to create a local Windows installer in `src-tauri/target/release/bundle/nsis`. Use `tools/release/build-windows.ps1` for release builds. It removes machine paths from Rust diagnostics and puts the x64 installer and checksum in `release/`. Run `npx vitest run` and `cargo test --manifest-path src-tauri/Cargo.toml --locked` for the frontend and core tests.
 
 After changing dependencies, regenerate the installer notices with `python tools/release/generate-notices.py` on Windows.
 
