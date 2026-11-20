@@ -22,6 +22,8 @@
 `Editor` and `Source` are lazy chunks; Reading mode is the default so cold start stays light.
 While Edit prepares, the previous view stays visible. The active tab keeps one rich editor for its current document revision. Changing the document in Source invalidates that instance, and switching tabs releases it.
 
+In Read, links open headings in place, Markdown and text in tabs, and linked images in the lightbox. Relative file references resolve against the current note. Supported document and media types go through the native `open_linked_file` command to the Windows default app.
+
 ## Never rewriting an untouched file (the core rule)
 - `Doc.content` is the current text, `Doc.saved` is what is on disk. Dirty = they differ.
 - The WYSIWYG editor always re-serialises markdown (bullets, table padding, setext → ATX…). `Editor.tsx` captures the untouched ProseMirror document as a **baseline** and delays serialising it until the first real edit. Output that matches the baseline restores the original bytes, including after undo.
@@ -67,7 +69,7 @@ Config dir: `%APPDATA%\com.faamirali.margin`. On first launch `drafts::migrate_f
 ## Styling
 - `styles/tokens.css`: eight themes (dark: carbon, graphite, midnight, ember; light: paper, linen, sepia, mist) + motion tokens. Only place with raw colours.
 - Fonts: Geist (UI, default body), Geist Mono (code), iA Writer Mono (default plain text, loaded at boot); iA Writer Duo/Quattro, Source Serif and the rest load after first paint (`fonts-extra.ts`).
-- `styles/prose.css`: document typography for Reading mode; `styles/crepe.css` repeats the same metrics for the editor so switching modes does not shift the text.
+- `styles/prose.css`: document typography for Read and Edit. Zoom changes text size independently of the column width. Notes with tables use the available document pane. `styles/crepe.css` matches the editor metrics to the reader.
 - Interaction rules come from `research/ui-reference.md`: press = `scale 0.96` over 160 ms `cubic-bezier(.22,1,.36,1)`, critically damped springs (`SPRING` in `components/ui/controls.tsx`), double-ring focus, 1px top highlight on raised surfaces.
 
 ## Testing

@@ -141,9 +141,11 @@ export function isMarkdownPath(p: string): boolean {
 export function resolveRelative(docDir: string, ref: string): string {
   const sep = docDir.includes('\\') ? '\\' : '/';
   const parts = docDir.split(/[\\/]/);
-  for (const seg of safeDecode(ref, decodeURI).split(/[\\/]/)) {
+  const root = docDir.startsWith('\\\\') ? 4 : isAbsolutePath(docDir) || /^[a-z]:$/i.test(docDir) ? 1 : 0;
+  for (const seg of ref.split(/[\\/]/)) {
     if (seg === '' || seg === '.') continue;
-    if (seg === '..') parts.pop();
+    if (seg === '..' && parts.length > root) parts.pop();
+    else if (seg === '..' && root) continue;
     else parts.push(seg);
   }
   return parts.join(sep);
@@ -166,12 +168,28 @@ export function asDataUrl(blob: Blob): Promise<string> {
   });
 }
 
-/** A local image URI becomes a path only when it has an absolute path or a document folder. */
-export function localImagePath(url: string, folder: string): string | null {
-  if (url.startsWith('//') || url.startsWith('#')) return null;
-  if (/^[a-z][a-z0-9+.-]*:/i.test(url) && !isAbsolutePath(url)) return null;
-  if (isAbsolutePath(url)) return safeDecode(url, decodeURI);
-  return folder ? resolveRelative(folder, url) : null;
+const FILE_URI = /^file:\/\/\/(?![/\\])/i;
+const DRIVE_REFERENCE = /^[a-z]:(?:[/\\]|%5c|%2f)/i;
+
+export function isExplicitFileReference(url: string): boolean {
+  return FILE_URI.test(url) || DRIVE_REFERENCE.test(url);
+}
+
+/** Resolve a Markdown destination, decoding the path separately from its query and fragment. */
+export function localReferencePath(url: string, folder: string): string | null {
+  if (!url || url.startsWith('//') || url.startsWith('#')) return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(url) && !isExplicitFileReference(url)) return null;
+  const fileUri = FILE_URI.test(url);
+  const encodedPath = url.split(/[?#]/, 1)[0];
+  const withoutScheme = fileUri ? encodedPath.slice('file://'.length) : encodedPath;
+  const decoded = safeDecode(withoutScheme);
+  const path = fileUri && /^\/[a-z]:[/\\]/i.test(decoded) ? decoded.slice(1) : decoded;
+  if (!path || /^(?:[/\\]){2}|[\x00-\x1f\x7f]/.test(path) || /:/.test(path.replace(/^[a-z]:[/\\]/i, ''))) return null;
+  if (path.startsWith('/')) {
+    const drive = /^[a-z]:/i.exec(folder)?.[0];
+    return drive ? drive + path : path;
+  }
+  return isAbsolutePath(path) ? path : folder ? resolveRelative(folder, path) : null;
 }
 
 /* ---------- browser fallback state ---------- */
@@ -419,6 +437,10 @@ export async function revealInExplorer(path: string): Promise<void> {
 export async function openExternal(url: string): Promise<void> {
   if (isTauri) await invoke<void>('open_external', { url });
   else window.open(url, '_blank', 'noopener');
+}
+
+export async function openLinkedFile(path: string): Promise<void> {
+  if (isTauri) await invoke<void>('open_linked_file', { path });
 }
 
 export async function appInfo(): Promise<AppInfo> {

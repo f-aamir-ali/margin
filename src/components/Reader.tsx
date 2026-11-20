@@ -1,14 +1,37 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { enhance } from '../lib/enhance';
 import { renderMarkdown, slugify } from '../lib/markdown';
-import { assetUrl, dirName, isAbsolutePath, isMarkdownPath, isTauri, localImagePath, openExternal, resolveRelative, safeDecode } from '../lib/platform';
+import { assetUrl, baseName, dirName, isMarkdownPath, isTauri, isTextPath, localReferencePath, openExternal, openLinkedFile, safeDecode } from '../lib/platform';
 import { activeTheme, isDarkTheme, useSettings } from '../lib/settings';
 import { useApp, type Doc } from '../lib/store';
 import { toast } from '../lib/toast';
 import { useUi } from '../lib/ui';
 import { flash, scrollToElement, useViewSync } from '../lib/viewSync';
 
-const REMOTE = /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i;
+const PREVIEW_IMAGE = /\.(?:apng|avif|bmp|gif|ico|jpe?g|jfif|png|svg|webp)$/i;
+
+async function followLink(href: string, label: string, doc: Doc, docDir: string) {
+  try {
+    if (/^(?:https?:\/\/|mailto:|\/\/)/i.test(href)) {
+      await openExternal(href.startsWith('//') ? 'https:' + href : href);
+      return;
+    }
+    const path = localReferencePath(href, docDir);
+    if (!path) {
+      toast.info("Couldn't resolve the link", href);
+    } else if (isMarkdownPath(path) || (isTauri && isTextPath(path))) {
+      await useApp.getState().openPaths([path]);
+    } else if (!isTauri) {
+      await openExternal(new URL(href, new URL(doc.path ?? '/', window.location.href)).href);
+    } else if (PREVIEW_IMAGE.test(path)) {
+      useUi.getState().setLightbox({ src: assetUrl(path), alt: label.trim() || baseName(path) });
+    } else {
+      await openLinkedFile(path);
+    }
+  } catch (error) {
+    toast.error("Couldn't open the link", String(error));
+  }
+}
 
 export function Reader({ doc }: { doc: Doc }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -28,8 +51,9 @@ export function Reader({ doc }: { doc: Doc }) {
       math: s.math,
       html: s.rawHtml,
       lineNumbers: s.codeLineNumbers,
+      localFiles: isTauri,
       resolveUrl: (url, kind) => {
-        const local = kind === 'image' && isTauri ? localImagePath(url, docDir) : null;
+        const local = kind === 'image' && isTauri ? localReferencePath(url, docDir) : null;
         return local ? assetUrl(local) : url;
       },
     });
@@ -75,7 +99,7 @@ export function Reader({ doc }: { doc: Doc }) {
       const a = target.closest<HTMLAnchorElement>('a[href]');
       if (a) {
         e.preventDefault();
-        const href = a.getAttribute('href') ?? '';
+        const href = a.dataset.marginFile ?? a.getAttribute('href') ?? '';
         if (href.startsWith('#')) {
           const id = safeDecode(href.slice(1));
           const dest = el.querySelector<HTMLElement>(`#${CSS.escape(id)}`) ?? el.querySelector<HTMLElement>(`#${CSS.escape(slugify(id))}`);
@@ -83,17 +107,8 @@ export function Reader({ doc }: { doc: Doc }) {
             scrollToElement(scroller, dest);
             flash(dest);
           }
-        } else if (/^(https?:|mailto:)/i.test(href)) {
-          void openExternal(href);
-        } else if (!REMOTE.test(href)) {
-          const [file, hash] = href.split('#');
-          const path = isAbsolutePath(file) ? file : resolveRelative(docDir, file);
-          if (isMarkdownPath(path)) {
-            void useApp.getState().openPaths([path]);
-            void hash;
-          } else {
-            toast.info("Can't open that link here", href);
-          }
+        } else if (href) {
+          void followLink(href, a.textContent || a.querySelector('img')?.alt || '', doc, docDir);
         }
         return;
       }

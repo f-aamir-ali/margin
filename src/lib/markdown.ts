@@ -9,6 +9,7 @@ import mark from "markdown-it-mark";
 import sup from "markdown-it-sup";
 import MarkdownIt, { type MarkdownIt as Md, type StateCore, type StateInline, type Token } from "markdown-it";
 import { highlight } from "./hljs";
+import { isExplicitFileReference } from "./platform";
 
 export interface Heading {
   level: 1 | 2 | 3 | 4 | 5 | 6;
@@ -25,6 +26,7 @@ export interface RenderOptions {
   math?: boolean; // $..$ and $$..$$               default true
   html?: boolean; // allow raw HTML (always sanitised) default true
   lineNumbers?: boolean; // code line numbers      default false
+  localFiles?: boolean; // desktop reader can handle explicit local paths
   /** Rewrites image and link URLs. Called for every URL except in-page `#fragments`. */
   resolveUrl?: (url: string, kind: "image" | "link") => string;
 }
@@ -115,6 +117,7 @@ interface ParserConfig {
   emoji: boolean;
   math: boolean;
   html: boolean;
+  localFiles: boolean;
 }
 
 const DEFAULTS = {
@@ -230,6 +233,7 @@ function resolveConfig(opts: RenderOptions): ParserConfig {
     emoji: opts.emoji ?? DEFAULTS.emoji,
     math: opts.math ?? DEFAULTS.math,
     html: opts.html ?? DEFAULTS.html,
+    localFiles: opts.localFiles ?? false,
   };
 }
 
@@ -240,7 +244,7 @@ function resolveConfig(opts: RenderOptions): ParserConfig {
 const parsers = new Map<string, Md>();
 
 function getParser(config: ParserConfig): Md {
-  const key = [config.breaks, config.linkify, config.typographer, config.emoji, config.math, config.html]
+  const key = [config.breaks, config.linkify, config.typographer, config.emoji, config.math, config.html, config.localFiles]
     .map((flag) => (flag ? "1" : "0"))
     .join("");
   let md = parsers.get(key);
@@ -258,6 +262,10 @@ function createParser(config: ParserConfig): Md {
     linkify: config.linkify,
     typographer: config.typographer,
   });
+  if (config.localFiles) {
+    const validateLink = md.validateLink;
+    md.validateLink = (url) => isExplicitFileReference(url) || validateLink(url);
+  }
 
   md.use(plug(footnote));
   md.use(plug(deflist));
@@ -551,7 +559,13 @@ function installRenderers(md: Md, config: ParserConfig): void {
     const token = tokens[idx];
     const href = attr(token, "href");
     if (href !== null && !href.startsWith("#")) {
-      token.attrSet("href", resolveUrl(href, "link", env as MarkdownEnv));
+      if (config.localFiles && isExplicitFileReference(href)) {
+        // Hand filesystem destinations to the native click handler without a navigable file URI.
+        token.attrSet("href", "#");
+        token.attrSet("data-margin-file", href);
+      } else {
+        token.attrSet("href", resolveUrl(href, "link", env as MarkdownEnv));
+      }
       if (EXTERNAL_URL.test(href)) {
         token.attrSet("target", "_blank");
         token.attrSet("rel", "noopener noreferrer");

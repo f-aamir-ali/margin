@@ -10,6 +10,8 @@ Margin is a Windows notepad with a Markdown reader and a live Markdown editor. O
 
 The installer is for 64-bit Windows PCs with an Intel or AMD processor. It uses Microsoft Edge WebView2, which the installer can download if it is missing. The installer is unsigned, so Windows may show an Unknown publisher or SmartScreen warning. A SHA-256 checksum is included on the release page.
 
+In Read mode, click a link to a local photo to preview it in Margin. PDF, Office and other supported attachments open in their Windows default app. Keep relative attachments in the same folder structure when moving a note to another computer.
+
 ## What you can do
 
 - Switch between reading, live editing, and raw Markdown. Render math with KaTeX, Mermaid diagrams, task lists, tables, footnotes, and highlighted code.

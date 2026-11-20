@@ -3,6 +3,7 @@ import { chromium } from 'playwright-core';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { createHarness } from './harness.mjs';
 
@@ -458,6 +459,57 @@ try {
   ok('edited Source stays visible until Edit is ready and the latest text survives on a long note',
     changed.blankFrames === 0 && changed.focused &&
       (await visibleEditor().textContent()).includes('Latest source text goes straight into Edit.'), JSON.stringify(changed));
+
+  const worksheet = path.join(dir, 'worksheet.md');
+  const photo = path.join(dir, 'assets', 'Photo #10.png');
+  fs.copyFileSync(path.join(dir, 'assets', attachments[0]), photo);
+  fs.writeFileSync(worksheet, [
+    '# Equilibrium practice',
+    '',
+    '| Order | Whole question | Focus | Source |',
+    '| --- | --- | --- | --- |',
+    '| 1 | Translational Q3 · Two force diagrams | Decide whether each set of forces balances | [Photo 10](assets/Photo%20%2310.png) |',
+    '',
+    '[Absolute photo](' + pathToFileURL(photo).href + ')',
+    '',
+    '[Second note](second.md)',
+  ].join('\n'));
+  launch([worksheet]);
+  await page.locator('.tab[data-active="true"] .tab-name').filter({ hasText: 'worksheet.md' }).waitFor();
+  await page.getByRole('radio', { name: 'Read', exact: true }).click();
+  const table = page.locator('.reader table');
+  await table.waitFor();
+  const widthAtDefaultZoom = (await table.boundingBox()).width;
+  const zoomOut = page.getByRole('button', { name: 'Zoom out', exact: true });
+  for (let i = 0; i < 4; i++) await zoomOut.click();
+  const layout = await table.evaluate((node) => {
+    const pane = node.closest('.doc-scroller');
+    const range = document.createRange();
+    range.selectNodeContents(node.querySelector('tbody td:last-child a'));
+    return {
+      pane: pane.clientWidth,
+      table: node.getBoundingClientRect().width,
+      linkLines: range.getClientRects().length,
+    };
+  });
+  ok('a worksheet table fills the reading pane at 60% zoom and its photo label fits on one line',
+    (await page.locator('.zoom-value').textContent()).trim() === '60%' &&
+      layout.table === widthAtDefaultZoom && layout.table / layout.pane > 0.85 && layout.linkLines === 1,
+    JSON.stringify(layout));
+
+  for (const label of ['Photo 10', 'Absolute photo']) {
+    await page.getByRole('link', { name: label, exact: true }).click();
+    await page.waitForFunction((alt) => {
+      const image = document.querySelector('.lightbox img');
+      return image?.alt === alt && image.naturalWidth === 2;
+    }, label);
+    await page.keyboard.press('Escape');
+    await page.locator('.lightbox').waitFor({ state: 'detached' });
+  }
+  ok('relative and file URL photo links decode spaces and hash signs and display the actual image', true);
+  await page.getByRole('link', { name: 'Second note', exact: true }).click();
+  await page.locator('.tab[data-active="true"] .tab-name').filter({ hasText: 'second.md' }).waitFor();
+  ok('a regular Markdown link still opens a tab', true);
 
   ok('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   await b.close();

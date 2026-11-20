@@ -120,7 +120,7 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ReactNode; gro
         rows: [
           { kind: 'slider', key: 'fontSize', label: 'Text size', min: 13, max: 24, step: 1, format: (v) => `${v} px` },
           { kind: 'slider', key: 'lineHeight', label: 'Line height', min: 1.3, max: 2.1, step: 0.05, format: (v) => v.toFixed(2) },
-          { kind: 'slider', key: 'contentWidth', label: 'Line width', hint: 'How wide the text column may grow.', min: 520, max: 1400, step: 20, format: (v) => `${v} px` },
+          { kind: 'slider', key: 'contentWidth', label: 'Line width', hint: 'The text column width for notes without tables.', min: 520, max: 1400, step: 20, format: (v) => `${v} px` },
           { kind: 'slider', key: 'paragraphSpacing', label: 'Paragraph spacing', min: 0.4, max: 1.8, step: 0.1, format: (v) => `${v.toFixed(1)} em` },
           { kind: 'switch', key: 'justify', label: 'Justify text', hint: 'Align both edges of each paragraph.' },
           { kind: 'switch', key: 'hyphens', label: 'Hyphenate', hint: 'Break long words at line ends.' },

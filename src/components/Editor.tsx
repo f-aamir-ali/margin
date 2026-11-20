@@ -17,7 +17,7 @@ import {
   dirName,
   isTauri,
   joinPath,
-  localImagePath,
+  localReferencePath,
   writeBinary,
 } from '../lib/platform';
 import { activeTheme, isDarkTheme, useSettings } from '../lib/settings';
@@ -142,7 +142,7 @@ export function Editor({ doc, active, onPreparing, onReady, onError }: {
           blockOnUpload: saveImage,
           proxyDomURL: (url: string) => {
             const path = docRef.current.path;
-            const local = isTauri ? localImagePath(url, path ? dirName(path) : '') : null;
+            const local = isTauri ? localReferencePath(url, path ? dirName(path) : '') : null;
             return local ? assetUrl(local) : url;
           },
         },

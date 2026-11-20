@@ -138,6 +138,7 @@ pub fn run() {
             files::list_dir,
             files::file_meta,
             files::reveal_in_explorer,
+            files::open_linked_file,
             watcher::watch_file,
             watcher::unwatch_file,
             store::store_get,

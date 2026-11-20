@@ -115,6 +115,69 @@ pub async fn reveal_in_explorer(app: AppHandle, path: String) -> Result<(), Stri
         .map_err(|err| format!("Couldn't show {} in Explorer: {err}.", target.display()))
 }
 
+#[tauri::command]
+pub async fn open_linked_file(app: AppHandle, path: String) -> Result<(), String> {
+    let target = blocking(move || {
+        let path = Path::new(&path);
+        if !is_local_path(path) {
+            return Err("This link needs an absolute path on a local drive.".to_owned());
+        }
+        let target = path
+            .canonicalize()
+            .map_err(|err| io_message("open", path, &err))?;
+        if !is_local_path(&target) {
+            return Err("This link needs a file or folder on a local drive.".to_owned());
+        }
+        if target.is_dir() || is_linked_document(&target) {
+            Ok(target)
+        } else {
+            Err(format!(
+                "Margin can't open this file type from a link: {}.",
+                file_name(&target)
+            ))
+        }
+    })
+    .await?;
+    let path = path_string(&target);
+    // The Windows shell expects a standard DOS path, while canonicalize returns a verbatim one.
+    let path = if cfg!(windows) {
+        path.strip_prefix(r"\\?\").unwrap_or(&path)
+    } else {
+        &path
+    };
+    app.opener().open_path(path, None::<&str>).map_err(|err| {
+        format!(
+            "Couldn't open {} in its default app: {err}.",
+            file_name(&target)
+        )
+    })
+}
+
+#[cfg(windows)]
+fn is_local_path(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    let mut components = path.components();
+    path.is_absolute()
+        && matches!(
+            components.next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        )
+        && components.all(|part| !part.as_os_str().to_string_lossy().contains(':'))
+}
+
+#[cfg(not(windows))]
+fn is_local_path(path: &Path) -> bool {
+    path.is_absolute()
+}
+
+fn is_linked_document(path: &Path) -> bool {
+    let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    let allowed = "pdf xps doc docx odt rtf xls xlsx ods ppt pptx odp epub zip 7z rar \
+        tif tiff heic heif mp3 wav flac m4a ogg mp4 m4v mov mkv avi webm";
+    allowed.split_ascii_whitespace().any(|known| ext.eq_ignore_ascii_case(known))
+}
+
 fn read_file_sync(path: &str, encoding: Option<&str>, force: bool) -> Result<FileData, String> {
     let target = absolute_path(path)?;
     let name = file_name(&target);

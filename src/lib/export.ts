@@ -1,6 +1,6 @@
 import { enhance } from './enhance';
 import { renderMarkdown } from './markdown';
-import { asDataUrl, assetUrl, baseName, dirName, downloadText, isTauri, localImagePath, pickSavePath, writeFile } from './platform';
+import { asDataUrl, assetUrl, baseName, dirName, downloadText, isTauri, localReferencePath, pickSavePath, writeFile } from './platform';
 import { activeTheme, isDarkTheme, useSettings } from './settings';
 import type { Doc } from './store';
 import { toast } from './toast';
@@ -36,7 +36,7 @@ async function renderDetached(doc: Doc, dark: boolean, embedImages = false): Pro
   if (isTauri) {
     const folder = doc.path ? dirName(doc.path) : '';
     await Promise.all(Array.from(host.querySelectorAll<HTMLImageElement>('img[src]')).map(async (img) => {
-      const local = localImagePath(img.getAttribute('src') ?? '', folder);
+      const local = localReferencePath(img.getAttribute('src') ?? '', folder);
       if (!local) return;
       const src = assetUrl(local);
       if (!embedImages) {

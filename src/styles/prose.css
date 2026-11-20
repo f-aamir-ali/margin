@@ -1,9 +1,9 @@
 /* Document typography. Shared by Reading mode (.prose.reader) and Editing mode (.prose.editor .ProseMirror),
-   so switching modes never shifts the text. Everything scales from --doc-size × --zoom. */
+   so switching modes never shifts the text. Text scales from --doc-size × --zoom. */
 
 .prose {
   --fs: calc(var(--doc-size) * var(--zoom, 1));
-  max-width: calc(var(--doc-width) * var(--zoom, 1));
+  max-width: var(--doc-width);
   margin: 0 auto;
   color: var(--doc-text);
   font-family: var(--font-doc);
@@ -15,6 +15,11 @@
   font-kerning: normal;
   font-variant-ligatures: common-ligatures contextual;
   font-optical-sizing: auto;
+}
+
+/* Table documents use the pane, even at the smallest text size. */
+.doc-scroller .prose:has(table) {
+  max-width: none;
 }
 
 .prose :where(h1, h2, h3, h4, h5, h6) {
@@ -670,7 +675,7 @@
 
 /* source view */
 .source {
-  max-width: calc((var(--doc-width) + 140px) * var(--zoom, 1));
+  max-width: calc(var(--doc-width) + 140px);
   margin: 0 auto;
   --fs: calc(var(--doc-size) * var(--zoom, 1));
 }
