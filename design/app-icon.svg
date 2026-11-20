@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Margin: a page with a blue margin rule, three lines of writing, and the blue dot that ends a thought. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1f1f1f"/>
+      <stop offset="1" stop-color="#0d0d0d"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.02"/>
+    </linearGradient>
+    <linearGradient id="blue" gradientUnits="userSpaceOnUse" x1="0" y1="262" x2="0" y2="762">
+      <stop offset="0" stop-color="#8bb8ff"/>
+      <stop offset="1" stop-color="#4f8cff"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="216" fill="url(#tile)"/>
+  <rect x="66" y="66" width="892" height="892" rx="214" fill="none" stroke="url(#rim)" stroke-width="4"/>
+  <path d="M330 262v500" stroke="url(#blue)" stroke-width="56" stroke-linecap="round"/>
+  <path d="M458 362h278M458 512h222M458 662h132" stroke="#f4f4f4" stroke-width="64" stroke-linecap="round"/>
+  <circle cx="702" cy="662" r="46" fill="url(#blue)"/>
+</svg>

@@ -1,0 +1,88 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Margin",
+  "version": "0.2.2",
+  "identifier": "com.faamirali.margin",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Margin",
+        "width": 1180,
+        "height": 780,
+        "minWidth": 560,
+        "minHeight": 400,
+        "center": true,
+        "decorations": false,
+        "visible": false,
+        "backgroundColor": "#0b0b0c",
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost blob: data: https:; font-src 'self' data: blob:; media-src 'self' asset: http://asset.localhost blob: data:; connect-src 'self' ipc: http://ipc.localhost asset: http://asset.localhost; object-src 'none'; base-uri 'self'; form-action 'none'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      },
+      "dangerousDisableAssetCspModification": [
+        "style-src"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "nsis",
+    "publisher": "F. Aamir Ali",
+    "shortDescription": "Margin",
+    "longDescription": "A Windows notepad with live Markdown and draft recovery.",
+    "resources": {
+      "../LICENSE": "LICENSE.txt",
+      "../THIRD_PARTY_NOTICES.txt": "THIRD_PARTY_NOTICES.txt"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["md", "markdown", "mdown", "mkd", "mdx", "mdwn"],
+        "name": "Margin.Markdown",
+        "description": "Markdown Document",
+        "role": "Editor",
+        "mimeType": "text/markdown"
+      },
+      {
+        "ext": ["txt", "text", "log"],
+        "name": "Margin.Text",
+        "description": "Text Document",
+        "role": "Editor",
+        "mimeType": "text/plain"
+      },
+      {
+        "ext": ["ini", "cfg", "conf", "nfo", "json", "jsonc", "yaml", "yml", "toml", "env", "properties", "gitignore", "gitattributes", "editorconfig"],
+        "name": "Margin.Config",
+        "description": "Configuration File",
+        "role": "Editor",
+        "mimeType": "text/plain"
+      }
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    }
+  }
+}

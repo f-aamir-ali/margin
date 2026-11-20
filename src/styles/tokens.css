@@ -1,0 +1,307 @@
+/* Design tokens. The only place raw colours live.
+   Themes are selected with <html data-theme="…">; accent with --accent set inline by settings. */
+
+:root {
+  /* geometry */
+  --r-xs: 6px;
+  --r-sm: 9px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --r-pill: 999px;
+  --gap: 8px;
+  --window-close-bg: #c42b35;
+  --window-close-fg: #fff;
+  --titlebar-h: 46px;
+  --window-control-width: 44px;
+  --statusbar-h: 30px;
+
+  /* motion: one family of curves for the whole app */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: linear(
+    0, 0.009, 0.035 2.1%, 0.141 4.4%, 0.723 12.9%, 0.938 16.7%, 1.017 19.4%,
+    1.067 22.5%, 1.089 25.9%, 1.086 30.1%, 1.027 43.6%, 1.006 51.6%, 0.997 61.4%, 1
+  );
+  --t-fast: 120ms;
+  --t-med: 220ms;
+  --t-slow: 420ms;
+
+  /* fonts (overridden by settings) */
+  --font-ui: 'Geist Variable', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-doc: 'Geist Variable', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-heading: var(--font-doc);
+  --font-mono: 'Geist Mono Variable', 'Cascadia Code', Consolas, monospace;
+
+  /* document metrics (overridden by settings) */
+  --doc-size: 17px;
+  --doc-leading: 1.7;
+  --doc-width: 760px;
+  --doc-para-gap: 1em;
+  --code-size: 0.86em;
+
+  --accent: #6aa3ff;
+  --accent-ink: #06101f;
+  --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+  --accent-line: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* ---------- Carbon: the default. Near-black, bencho-style. ---------- */
+:root,
+:root[data-theme='carbon'] {
+  color-scheme: dark;
+  --bg: #090909;
+  --tile: #141414;
+  --tile-2: #1a1a1a;
+  --raised: #242424;
+  --raised-2: #2d2d2d;
+  --raised-3: #383838;
+  --line: rgba(255, 255, 255, 0.065);
+  --line-2: rgba(255, 255, 255, 0.11);
+  --text: #f4f4f4;
+  --text-2: #a3a3a3;
+  --text-3: #6f6f6f;
+  --text-4: #4a4a4a;
+  --doc-bg: var(--tile);
+  --doc-text: #e6e6e6;
+  --doc-heading: #fafafa;
+  --doc-muted: #9a9a9a;
+  --code-bg: #0e0e0e;
+  --inline-code-bg: rgba(255, 255, 255, 0.075);
+  --mark-bg: rgba(250, 204, 21, 0.26);
+  --mark-text: #fde68a;
+  --selection: color-mix(in srgb, var(--accent) 34%, transparent);
+  --shadow-pop: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 18px 50px -12px rgba(0, 0, 0, 0.75), 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-soft: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 1px 2px rgba(0, 0, 0, 0.4);
+  --hl-top: rgba(255, 255, 255, 0.06);
+  --scrim: rgba(0, 0, 0, 0.55);
+  --danger: #ff5c5c;
+  --ok: #3ecf8e;
+  --warn: #f5a524;
+
+  --syn-comment: #6b6b6b;
+  --syn-keyword: #c792ea;
+  --syn-string: #9ece6a;
+  --syn-number: #f5a97f;
+  --syn-func: #7aa2f7;
+  --syn-type: #5fd7d7;
+  --syn-var: #e6e6e6;
+  --syn-tag: #f7768e;
+  --syn-attr: #e0af68;
+  --syn-punct: #9a9a9a;
+
+  --alert-note: #6aa3ff;
+  --alert-tip: #3ecf8e;
+  --alert-important: #b388ff;
+  --alert-warning: #f5a524;
+  --alert-caution: #ff6b6b;
+}
+
+:root[data-theme='graphite'] {
+  color-scheme: dark;
+  --bg: #17181a;
+  --tile: #1f2023;
+  --tile-2: #25262a;
+  --raised: #2e3035;
+  --raised-2: #383a40;
+  --raised-3: #44474e;
+  --line: rgba(255, 255, 255, 0.07);
+  --line-2: rgba(255, 255, 255, 0.12);
+  --text: #f1f2f4;
+  --text-2: #a9adb6;
+  --text-3: #767a84;
+  --text-4: #555963;
+  --doc-text: #dfe1e6;
+  --doc-heading: #f7f8fa;
+  --doc-muted: #9aa0ab;
+  --code-bg: #18191b;
+}
+
+:root[data-theme='midnight'] {
+  color-scheme: dark;
+  --bg: #070a12;
+  --tile: #0e1320;
+  --tile-2: #131a2a;
+  --raised: #1a2236;
+  --raised-2: #222c44;
+  --raised-3: #2c3855;
+  --line: rgba(150, 180, 255, 0.08);
+  --line-2: rgba(150, 180, 255, 0.15);
+  --text: #eef2ff;
+  --text-2: #9aa7c7;
+  --text-3: #66739a;
+  --text-4: #445072;
+  --doc-text: #d7def2;
+  --doc-heading: #f4f7ff;
+  --doc-muted: #8d9bbf;
+  --code-bg: #090d18;
+  --inline-code-bg: rgba(150, 180, 255, 0.1);
+}
+
+/* ---------- Light family ---------- */
+/* Ember: warm near-black with parchment text, for writing at night. */
+:root[data-theme='ember'] {
+  color-scheme: dark;
+  --bg: #0f0d0b;
+  --tile: #191613;
+  --tile-2: #1f1b17;
+  --raised: #29241f;
+  --raised-2: #332d27;
+  --raised-3: #3f3830;
+  --line: rgba(255, 236, 214, 0.07);
+  --line-2: rgba(255, 236, 214, 0.12);
+  --text: #f1e8dc;
+  --text-2: #b3a796;
+  --text-3: #7f7466;
+  --text-4: #585046;
+  --doc-bg: var(--tile);
+  --doc-text: #e8dfd1;
+  --doc-heading: #fbf4ea;
+  --doc-muted: #a2968a;
+  --code-bg: #130f0d;
+  --inline-code-bg: rgba(255, 236, 214, 0.08);
+  --mark-bg: rgba(245, 165, 36, 0.26);
+  --mark-text: #fcd9a0;
+
+  --syn-comment: #7a6e60;
+  --syn-keyword: #e09a6b;
+  --syn-string: #b8c47a;
+  --syn-number: #e8b45c;
+  --syn-func: #8fb4d9;
+  --syn-type: #79c2b0;
+  --syn-var: #e8dfd1;
+  --syn-tag: #e07f6b;
+  --syn-attr: #d9b26b;
+  --syn-punct: #9c9083;
+}
+
+:root[data-theme='paper'],
+:root[data-theme='linen'],
+:root[data-theme='sepia'],
+:root[data-theme='mist'] {
+  color-scheme: light;
+  --accent-ink: #ffffff;
+  --shadow-pop: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 18px 50px -14px rgba(0, 0, 0, 0.22), 0 4px 12px rgba(0, 0, 0, 0.06);
+  --shadow-soft: 0 1px 0 rgba(255, 255, 255, 0.8) inset, 0 1px 2px rgba(0, 0, 0, 0.06);
+  --hl-top: rgba(255, 255, 255, 0.9);
+  --scrim: rgba(20, 20, 20, 0.28);
+  --danger: #d92d20;
+  --ok: #12925a;
+  --warn: #b76e00;
+  --mark-bg: rgba(250, 204, 21, 0.42);
+  --mark-text: inherit;
+
+  --syn-comment: #8a8f98;
+  --syn-keyword: #8b3fd9;
+  --syn-string: #2f7d32;
+  --syn-number: #b5540a;
+  --syn-func: #1f5fd1;
+  --syn-type: #0b7c86;
+  --syn-var: #24262b;
+  --syn-tag: #c2255c;
+  --syn-attr: #9a6700;
+  --syn-punct: #6b7078;
+
+  --alert-note: #1f6feb;
+  --alert-tip: #12925a;
+  --alert-important: #7c3aed;
+  --alert-warning: #b76e00;
+  --alert-caution: #d92d20;
+}
+
+:root[data-theme='paper'] {
+  --bg: #ececec;
+  --tile: #ffffff;
+  --tile-2: #f6f6f6;
+  --raised: #efefef;
+  --raised-2: #e6e6e6;
+  --raised-3: #d9d9d9;
+  --line: rgba(0, 0, 0, 0.07);
+  --line-2: rgba(0, 0, 0, 0.13);
+  --text: #141414;
+  --text-2: #5c5c5c;
+  --text-3: #8c8c8c;
+  --text-4: #b5b5b5;
+  --doc-bg: #ffffff;
+  --doc-text: #262626;
+  --doc-heading: #0f0f0f;
+  --doc-muted: #6b6b6b;
+  --code-bg: #f6f6f6;
+  --inline-code-bg: rgba(0, 0, 0, 0.06);
+  --selection: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+/* Linen: warm off-white, softer than Paper for long writing sessions. */
+:root[data-theme='linen'] {
+  --bg: #e9e4dc;
+  --tile: #fbf9f5;
+  --tile-2: #f4f0e9;
+  --raised: #efeae2;
+  --raised-2: #e6e0d6;
+  --raised-3: #d9d2c6;
+  --line: rgba(60, 45, 25, 0.08);
+  --line-2: rgba(60, 45, 25, 0.14);
+  --text: #1f1b16;
+  --text-2: #5f574c;
+  --text-3: #8f867a;
+  --text-4: #bdb5a9;
+  --doc-bg: #fbf9f5;
+  --doc-text: #2a251f;
+  --doc-heading: #15120e;
+  --doc-muted: #6f665a;
+  --code-bg: #f3efe7;
+  --inline-code-bg: rgba(60, 45, 25, 0.07);
+  --selection: color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+:root[data-theme='sepia'] {
+  --bg: #e6dcc8;
+  --tile: #f6eedd;
+  --tile-2: #efe6d2;
+  --raised: #e8dec8;
+  --raised-2: #dfd3ba;
+  --raised-3: #d2c5a9;
+  --line: rgba(80, 55, 20, 0.1);
+  --line-2: rgba(80, 55, 20, 0.18);
+  --text: #2e2416;
+  --text-2: #6b5a3f;
+  --text-3: #96846a;
+  --text-4: #b9a98f;
+  --doc-bg: #f6eedd;
+  --doc-text: #3a2e1c;
+  --doc-heading: #241a0c;
+  --doc-muted: #7a684c;
+  --code-bg: #ede3cd;
+  --inline-code-bg: rgba(80, 55, 20, 0.09);
+  --selection: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+:root[data-theme='mist'] {
+  --bg: #dfe4ea;
+  --tile: #f5f7fa;
+  --tile-2: #ecf0f4;
+  --raised: #e4e9ef;
+  --raised-2: #d8dfe7;
+  --raised-3: #c8d1dc;
+  --line: rgba(20, 40, 70, 0.08);
+  --line-2: rgba(20, 40, 70, 0.15);
+  --text: #131a24;
+  --text-2: #51606f;
+  --text-3: #8391a1;
+  --text-4: #aeb9c6;
+  --doc-bg: #f5f7fa;
+  --doc-text: #232c38;
+  --doc-heading: #0d131b;
+  --doc-muted: #617080;
+  --code-bg: #e9edf2;
+  --inline-code-bg: rgba(20, 40, 70, 0.07);
+  --selection: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+/* Reduced motion: honour both the OS and the in-app setting. */
+:root[data-motion='reduced'] {
+  --t-fast: 1ms;
+  --t-med: 1ms;
+  --t-slow: 1ms;
+  --ease-spring: linear;
+}
