@@ -473,6 +473,8 @@ try {
     '[Absolute photo](' + pathToFileURL(photo).href + ')',
     '',
     '[Second note](second.md)',
+    '',
+    '[Plain text](ansi.txt)',
   ].join('\n'));
   launch([worksheet]);
   await page.locator('.tab[data-active="true"] .tab-name').filter({ hasText: 'worksheet.md' }).waitFor();
@@ -497,19 +499,27 @@ try {
       layout.table === widthAtDefaultZoom && layout.table / layout.pane > 0.85 && layout.linkLines === 1,
     JSON.stringify(layout));
 
-  for (const label of ['Photo 10', 'Absolute photo']) {
+  // Check the shell handoff independently of which apps this PC has set as defaults.
+  await page.evaluate(() => {
+    const fetch = window.fetch.bind(window);
+    const opener = window.__TAURI_INTERNALS__.convertFileSrc('open_linked_file', 'ipc');
+    window.marginLinkedPaths = [];
+    window.fetch = async (url, options) => {
+      if (url !== opener) return fetch(url, options);
+      window.marginLinkedPaths.push(JSON.parse(options.body).path);
+      return new Response('null', { headers: { 'Tauri-Response': 'ok', 'Content-Type': 'application/json' } });
+    };
+  });
+  for (const [index, label] of ['Photo 10', 'Absolute photo', 'Second note', 'Plain text'].entries()) {
     await page.getByRole('link', { name: label, exact: true }).click();
-    await page.waitForFunction((alt) => {
-      const image = document.querySelector('.lightbox img');
-      return image?.alt === alt && image.naturalWidth === 2;
-    }, label);
-    await page.keyboard.press('Escape');
-    await page.locator('.lightbox').waitFor({ state: 'detached' });
+    await page.waitForFunction((count) => window.marginLinkedPaths.length === count, index + 1);
   }
-  ok('relative and file URL photo links decode spaces and hash signs and display the actual image', true);
-  await page.getByRole('link', { name: 'Second note', exact: true }).click();
-  await page.locator('.tab[data-active="true"] .tab-name').filter({ hasText: 'second.md' }).waitFor();
-  ok('a regular Markdown link still opens a tab', true);
+  const forwarded = await page.evaluate(() => window.marginLinkedPaths);
+  ok('both photo links are resolved and sent to the Windows opener',
+    forwarded.slice(0, 2).every((file) => path.normalize(file) === photo) && await page.locator('.lightbox').count() === 0);
+  ok('Markdown and text file links also go through the default app handler',
+    path.normalize(forwarded[2]) === second && path.normalize(forwarded[3]) === ansi &&
+    (await activeName(page)) === 'worksheet.md');
 
   ok('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   await b.close();

@@ -1,16 +1,14 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { enhance } from '../lib/enhance';
 import { renderMarkdown, slugify } from '../lib/markdown';
-import { assetUrl, baseName, dirName, isMarkdownPath, isTauri, isTextPath, localReferencePath, openExternal, openLinkedFile, safeDecode } from '../lib/platform';
+import { assetUrl, dirName, isMarkdownPath, isTauri, localReferencePath, openExternal, openLinkedFile, safeDecode } from '../lib/platform';
 import { activeTheme, isDarkTheme, useSettings } from '../lib/settings';
 import { useApp, type Doc } from '../lib/store';
 import { toast } from '../lib/toast';
 import { useUi } from '../lib/ui';
 import { flash, scrollToElement, useViewSync } from '../lib/viewSync';
 
-const PREVIEW_IMAGE = /\.(?:apng|avif|bmp|gif|ico|jpe?g|jfif|png|svg|webp)$/i;
-
-async function followLink(href: string, label: string, doc: Doc, docDir: string) {
+async function followLink(href: string, doc: Doc, docDir: string) {
   try {
     if (/^(?:https?:\/\/|mailto:|\/\/)/i.test(href)) {
       await openExternal(href.startsWith('//') ? 'https:' + href : href);
@@ -19,14 +17,12 @@ async function followLink(href: string, label: string, doc: Doc, docDir: string)
     const path = localReferencePath(href, docDir);
     if (!path) {
       toast.info("Couldn't resolve the link", href);
-    } else if (isMarkdownPath(path) || (isTauri && isTextPath(path))) {
-      await useApp.getState().openPaths([path]);
-    } else if (!isTauri) {
-      await openExternal(new URL(href, new URL(doc.path ?? '/', window.location.href)).href);
-    } else if (PREVIEW_IMAGE.test(path)) {
-      useUi.getState().setLightbox({ src: assetUrl(path), alt: label.trim() || baseName(path) });
-    } else {
+    } else if (isTauri) {
       await openLinkedFile(path);
+    } else if (isMarkdownPath(path)) {
+      await useApp.getState().openPaths([path]);
+    } else {
+      await openExternal(new URL(href, new URL(doc.path ?? '/', window.location.href)).href);
     }
   } catch (error) {
     toast.error("Couldn't open the link", String(error));
@@ -108,7 +104,7 @@ export function Reader({ doc }: { doc: Doc }) {
             flash(dest);
           }
         } else if (href) {
-          void followLink(href, a.textContent || a.querySelector('img')?.alt || '', doc, docDir);
+          void followLink(href, doc, docDir);
         }
         return;
       }

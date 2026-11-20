@@ -128,7 +128,7 @@ pub async fn open_linked_file(app: AppHandle, path: String) -> Result<(), String
         if !is_local_path(&target) {
             return Err("This link needs a file or folder on a local drive.".to_owned());
         }
-        if target.is_dir() || is_linked_document(&target) {
+        if target.is_dir() || is_linked_file_type(&target) {
             Ok(target)
         } else {
             Err(format!(
@@ -171,10 +171,16 @@ fn is_local_path(path: &Path) -> bool {
     path.is_absolute()
 }
 
-fn is_linked_document(path: &Path) -> bool {
+fn is_linked_file_type(path: &Path) -> bool {
+    if is_markdown_path(path) {
+        return true;
+    }
     let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    // These formats are opened for viewing. Executables, scripts and shortcuts stay out of the shell.
     let allowed = "pdf xps doc docx odt rtf xls xlsx ods ppt pptx odp epub zip 7z rar \
-        tif tiff heic heif mp3 wav flac m4a ogg mp4 m4v mov mkv avi webm";
+        txt text log ini cfg conf nfo json jsonc yaml yml toml csv tsv xml html htm \
+        apng avif bmp gif ico jpg jpeg jfif png svg webp tif tiff heic heif \
+        mp3 wav flac m4a ogg mp4 m4v mov mkv avi webm";
     allowed.split_ascii_whitespace().any(|known| ext.eq_ignore_ascii_case(known))
 }
 

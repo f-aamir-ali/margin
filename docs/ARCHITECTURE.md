@@ -22,7 +22,7 @@
 `Editor` and `Source` are lazy chunks; Reading mode is the default so cold start stays light.
 While Edit prepares, the previous view stays visible. The active tab keeps one rich editor for its current document revision. Changing the document in Source invalidates that instance, and switching tabs releases it.
 
-In Read, links open headings in place, Markdown and text in tabs, and linked images in the lightbox. Relative file references resolve against the current note. Supported document and media types go through the native `open_linked_file` command to the Windows default app.
+In Read, headings open in place and web links go to the default browser. Relative file references resolve against the current note. Local images, notes and other supported file types go through the native `open_linked_file` command to the Windows default app.
 
 ## Never rewriting an untouched file (the core rule)
 - `Doc.content` is the current text, `Doc.saved` is what is on disk. Dirty = they differ.
