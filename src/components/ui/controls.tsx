@@ -54,9 +54,10 @@ interface SegmentedProps<T extends string> {
   options: { value: T; label: ReactNode; title?: string; keys?: string }[];
   size?: 'sm' | 'md';
   ariaLabel?: string;
+  tipSide?: 'top' | 'bottom';
 }
 
-export function Segmented<T extends string>({ value, onChange, options, size = 'md', ariaLabel }: SegmentedProps<T>) {
+export function Segmented<T extends string>({ value, onChange, options, size = 'md', ariaLabel, tipSide }: SegmentedProps<T>) {
   const id = useId();
   return (
     <div className={`segmented segmented-${size}`} role="radiogroup" aria-label={ariaLabel}>
@@ -69,8 +70,10 @@ export function Segmented<T extends string>({ value, onChange, options, size = '
             role="radio"
             aria-checked={on}
             data-on={on || undefined}
+            aria-label={o.title}
             data-tip={o.title}
             data-tip-keys={o.keys}
+            data-tip-side={tipSide}
             className="segmented-item"
             onClick={() => onChange(o.value)}
           >

@@ -6,7 +6,7 @@ import { activeTheme, isDarkTheme, useSettings } from '../lib/settings';
 import { useApp, type Doc } from '../lib/store';
 import { toast } from '../lib/toast';
 import { useUi } from '../lib/ui';
-import { flash, scrollToElement, useViewSync } from '../lib/viewSync';
+import { flash, scrollToElement, useLongPage, useViewSync } from '../lib/viewSync';
 
 async function followLink(href: string, doc: Doc, docDir: string) {
   try {
@@ -74,6 +74,7 @@ export function Reader({ doc }: { doc: Doc }) {
     });
   }, [rendered, dark, s.diagrams]);
 
+  useLongPage(scrollerRef, rendered);
   useViewSync(doc, scrollerRef, contentRef, rendered);
 
   // One delegated listener for links, task boxes and images.

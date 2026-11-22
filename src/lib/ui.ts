@@ -19,6 +19,8 @@ interface UiStore {
   settings: SettingsSection | null;
   find: boolean;
   findReplace: boolean;
+  /** Bumped on every Ctrl+F, so an open find bar takes the focus again. */
+  findFocus: number;
   lightbox: { src: string; alt: string } | null;
   dropHover: boolean;
   /** Ask the user before closing a dirty tab (or the window). */
@@ -46,6 +48,7 @@ export const useUi = create<UiStore>((set) => ({
   settings: null,
   find: false,
   findReplace: false,
+  findFocus: 0,
   lightbox: null,
   dropHover: false,
   confirmClose: null,
@@ -56,7 +59,7 @@ export const useUi = create<UiStore>((set) => ({
   toggle: (what) => set((s) => ({ [what]: !s[what], paletteQuery: '' }) as Partial<UiStore>),
   openPalette: (query = '') => set({ palette: true, paletteQuery: query }),
   openSettings: (section = 'appearance') => set({ settings: section, palette: false }),
-  openFind: (replace = false) => set({ find: true, findReplace: replace }),
+  openFind: (replace = false) => set((s) => ({ find: true, findReplace: replace, findFocus: s.findFocus + 1 })),
   setLightbox: (lightbox) => set({ lightbox }),
   setDropHover: (dropHover) => set({ dropHover }),
   setConfirmClose: (confirmClose) => set({ confirmClose }),

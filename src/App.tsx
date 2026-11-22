@@ -5,6 +5,7 @@ import { ContextMenu } from './components/ContextMenu';
 import { FindBar } from './components/FindBar';
 import { Palette } from './components/Palette';
 import { Reader } from './components/Reader';
+import { ScrollTop } from './components/ScrollTop';
 import { SettingsPanel } from './components/Settings';
 import { Sidebar } from './components/Sidebar';
 import { StatusBar } from './components/StatusBar';
@@ -17,6 +18,7 @@ import { appWindow, onFileChanged, onFilesDropped, onOpenFiles } from './lib/pla
 import { activeTheme, applySettings, isDarkTheme, useSettings, type ViewMode } from './lib/settings';
 import { activeDoc, displayName, flushAll, isDirty, useApp, viewMode, type Doc } from './lib/store';
 import { attachSounds, play } from './lib/sound';
+import { countWords } from './lib/stats';
 import { toast } from './lib/toast';
 import { useUi } from './lib/ui';
 import { useView } from './lib/viewSync';
@@ -170,7 +172,7 @@ export default function App() {
       const sel = document.getSelection();
       const inDoc = sel?.anchorNode && document.querySelector('.doc-view')?.contains(sel.anchorNode);
       const text = inDoc && sel && !sel.isCollapsed ? sel.toString() : '';
-      const words = text ? text.trim().split(/\s+/).filter(Boolean).length : 0;
+      const words = text ? countWords(text) : 0;
       if (useView.getState().selectionWords !== words && !document.querySelector('.doc-view .cm-editor.cm-focused')) {
         useView.getState().set({ selectionWords: words });
       }
@@ -199,6 +201,7 @@ export default function App() {
             {settings.showProgress && doc && viewMode(doc) !== 'source' && <ProgressLine />}
             <AnimatePresence>{find && doc && <FindBar key={`find-${doc.id}-${viewMode(doc)}`} doc={doc} />}</AnimatePresence>
             {doc ? <DocumentStage key={`${doc.id}-${doc.kind}`} doc={doc} /> : <div className="doc-stage"><Welcome /></div>}
+            {doc && <ScrollTop docId={doc.id} />}
           </main>
         </div>
 

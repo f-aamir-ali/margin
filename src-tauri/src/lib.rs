@@ -1,5 +1,7 @@
 mod drafts;
 mod files;
+#[cfg(windows)]
+mod snap_layout;
 mod store;
 mod watcher;
 #[cfg(windows)]
@@ -59,6 +61,20 @@ fn set_window_theme(app: AppHandle, dark: bool) -> Result<(), String> {
     window
         .set_theme(Some(theme))
         .map_err(|err| format!("Couldn't set the window theme: {err}."))
+}
+
+/// Opens Snap Layouts when the pointer rests on the maximize button. Only Windows has the flyout.
+#[tauri::command]
+fn show_snap_layout(app: AppHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        snap_layout::show(&app)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -149,6 +165,7 @@ pub fn run() {
             launch_files,
             app_info,
             set_window_theme,
+            show_snap_layout,
             open_external,
         ])
         .run(tauri::generate_context!())

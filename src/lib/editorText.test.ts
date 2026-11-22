@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fromEditor, toEditor } from './editorText';
+import { dashLinesAsSeparators, fromEditor, toEditor } from './editorText';
 
 describe('toEditor: display math spellings', () => {
   it('leaves a well-formed block alone', () => {
@@ -58,5 +58,24 @@ describe('fromEditor', () => {
     expect(fromEditor('line one<br />\nline two')).toBe('line one<br />\nline two');
     const code = '```html\n\n<br />\n\n```';
     expect(fromEditor(code)).toBe(code);
+  });
+});
+
+describe('dashLinesAsSeparators', () => {
+  it('turns a dash line under a paragraph into a separator, not a heading', () => {
+    expect(dashLinesAsSeparators('First thought.\n---\nSecond thought.\n---\n')).toBe('First thought.\n\n---\nSecond thought.\n\n---\n');
+  });
+  it('keeps CRLF', () => {
+    expect(dashLinesAsSeparators('A\r\n---\r\nB')).toBe('A\r\n\r\n---\r\nB');
+  });
+  it('leaves front matter, code fences and existing separators alone', () => {
+    const fm = '---\ntitle: x\n---\nBody\n\n---\nMore';
+    expect(dashLinesAsSeparators(fm)).toBe(fm);
+    const code = '```\nline\n---\n```';
+    expect(dashLinesAsSeparators(code)).toBe(code);
+  });
+  it('does not touch === headings or table rules', () => {
+    const t = 'Title\n===\n\n| a |\n|---|\n| 1 |';
+    expect(dashLinesAsSeparators(t)).toBe(t);
   });
 });

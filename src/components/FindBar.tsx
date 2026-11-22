@@ -209,9 +209,38 @@ export function FindBar({ doc }: { doc: Doc }) {
     };
   }, [search, reveal]);
 
+  useEffect(() => clearPaint, []);
+
+  // Ctrl+F always puts the caret in the find field, ready to type, even if the editor had it.
+  const focusNonce = useUi((s) => s.findFocus);
   useEffect(() => {
-    inputRef.current?.select();
-    return clearPaint;
+    const input = inputRef.current;
+    if (!input) return;
+    const grab = () => {
+      input.focus({ preventScroll: true });
+      input.select();
+    };
+    grab();
+    // The editors re-focus themselves on the next frame when they mount or switch mode.
+    const raf = requestAnimationFrame(() => requestAnimationFrame(grab));
+    const late = setTimeout(() => {
+      if (document.activeElement !== input) grab();
+    }, 120);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(late);
+    };
+  }, [focusNonce]);
+
+  // Clicking back into the page means you're done finding: the bar goes away.
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      const target = e.target as Element | null;
+      if (!target || target.closest('.findbar')) return;
+      if (target.closest('.doc-view')) close();
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    return () => document.removeEventListener('pointerdown', onDown, true);
   }, []);
 
   const step = (dir: 1 | -1) => {

@@ -96,3 +96,39 @@ export function fromEditor(md: string): string {
     .replace(ALERT, (_m, prefix: string, kind: string) => `${prefix}[!${kind}]`)
     .replace(TOC, (_m, open?: string) => (open ? '[[toc]]' : '[toc]'));
 }
+
+const DASH_UNDERLINE = /^ {0,3}-{2,}[ \t]*$/;
+
+/**
+ * Plain text often separates paragraphs with a `---` line. In markdown, a dash line directly
+ * under a line of text turns that text into a big (setext) heading. When a plain-text note is
+ * formatted as markdown, keep those lines as separators by giving them a blank line above.
+ * Front matter and fenced code are left alone.
+ */
+export function dashLinesAsSeparators(text: string): string {
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const lines = text.split(/\r?\n/);
+  const out: string[] = [];
+  let fence: string | null = null;
+  let start = 0;
+  // YAML front matter: `---` on the first line up to the next `---`.
+  if (/^---[ \t]*$/.test(lines[0] ?? '')) {
+    const close = lines.findIndex((l, i) => i > 0 && /^(---|\.\.\.)[ \t]*$/.test(l));
+    if (close > 0) {
+      out.push(...lines.slice(0, close + 1));
+      start = close + 1;
+    }
+  }
+  for (let i = start; i < lines.length; i++) {
+    const line = lines[i];
+    const f = FENCE.exec(line);
+    if (f) {
+      if (!fence) fence = f[1];
+      else if (f[1][0] === fence[0] && f[1].length >= fence.length && line.trim() === f[1]) fence = null;
+    } else if (!fence && DASH_UNDERLINE.test(line) && out.length > start && out[out.length - 1].trim() !== '') {
+      out.push('');
+    }
+    out.push(line);
+  }
+  return out.join(eol);
+}

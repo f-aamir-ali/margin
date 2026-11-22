@@ -2,7 +2,8 @@ import { syntaxHighlighting } from '@codemirror/language';
 import { Crepe } from '@milkdown/crepe';
 import { editorViewCtx, remarkStringifyOptionsCtx, serializerCtx } from '@milkdown/kit/core';
 import type { Node as ProseNode } from '@milkdown/kit/prose/model';
-import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
+import { Plugin, PluginKey, Selection, TextSelection } from '@milkdown/kit/prose/state';
+import { trailingConfig } from '@milkdown/kit/plugin/trailing';
 import { Decoration, DecorationSet } from '@milkdown/kit/prose/view';
 import { $prose } from '@milkdown/kit/utils';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -23,7 +24,7 @@ import {
 import { activeTheme, isDarkTheme, useSettings } from '../lib/settings';
 import { liveEditors, useApp, type Doc } from '../lib/store';
 import { toast } from '../lib/toast';
-import { useViewSync } from '../lib/viewSync';
+import { useLongPage, useViewSync } from '../lib/viewSync';
 
 const FRONT_MATTER = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
 const SNAP_BLOCKS = 'h1, h2, h3, h4, h5, h6, blockquote, ul, ol, hr, .milkdown-code-block, .milkdown-table-block';
@@ -192,6 +193,12 @@ export function Editor({ doc, active, onPreparing, onReady, onError }: {
         incrementListMarker: true,
       }));
       configureMarkSerialisers(ctx);
+      // An empty line is added after the last block only when you couldn't otherwise type after it
+      // (code, tables, math, images). After a list or quote it was a phantom line the Down key reached.
+      ctx.update(trailingConfig.key, (prev) => ({
+        ...prev,
+        shouldAppend: (last: ProseNode | null) => !!last && /code|table|math|image|hr|html|diagram/i.test(last.type.name),
+      }));
     });
     crepe.editor.use(activeBlock).use(alertBlocks).use(extraMarks);
 
@@ -287,7 +294,42 @@ export function Editor({ doc, active, onPreparing, onReady, onError }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc.id, doc.rev, s.slashMenu, s.selectionToolbar, s.math, s.spellcheck, s.diagrams, dark]);
 
+  useLongPage(scrollerRef, ready);
   useViewSync(doc, scrollerRef, hostRef, ready, active);
+
+  // Like Notepad: clicking the empty page below the text puts the caret at the very end;
+  // clicking in the side margin puts it on the nearest line.
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    if (!active || !ready || !scroller) return;
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 0 || e.shiftKey || e.detail > 1) return;
+      const host = hostRef.current;
+      const pm = host?.querySelector<HTMLElement>('.ProseMirror');
+      const crepe = crepeRef.current;
+      if (!host || !pm || !crepe) return;
+      const target = e.target as Element;
+      const last = pm.lastElementChild as HTMLElement | null;
+      const below = !last || e.clientY > last.getBoundingClientRect().bottom;
+      const inMargin = target === scroller || target === host || target === pm;
+      if (!(below && (inMargin || pm.contains(target))) && !inMargin) return;
+      e.preventDefault();
+      e.stopPropagation();
+      crepe.editor.action((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        let selection: Selection = Selection.atEnd(view.state.doc);
+        if (!below) {
+          const box = pm.getBoundingClientRect();
+          const hit = view.posAtCoords({ left: Math.min(Math.max(e.clientX, box.left + 2), box.right - 2), top: e.clientY });
+          if (hit) selection = TextSelection.near(view.state.doc.resolve(hit.pos));
+        }
+        view.focus();
+        view.dispatch(view.state.tr.setSelection(selection).scrollIntoView());
+      });
+    };
+    scroller.addEventListener('mousedown', onDown, true);
+    return () => scroller.removeEventListener('mousedown', onDown, true);
+  }, [active, ready]);
 
   useEffect(() => {
     if (!active || !ready || !s.smoothCaret || !scrollerRef.current) return;
@@ -341,19 +383,6 @@ export function Editor({ doc, active, onPreparing, onReady, onError }: {
       ref={scrollerRef}
       data-mode="edit"
       data-typewriter={s.typewriter || undefined}
-      onMouseDown={(e) => {
-        // Clicking the empty margin below the text puts the caret at the end, like a real page.
-        if (e.target === scrollerRef.current || e.target === hostRef.current) {
-          const pm = hostRef.current?.querySelector<HTMLElement>('.ProseMirror');
-          if (pm) {
-            e.preventDefault();
-            pm.focus();
-            const sel = document.getSelection();
-            sel?.selectAllChildren(pm);
-            sel?.collapseToEnd();
-          }
-        }
-      }}
     >
       <div className="prose editor" ref={hostRef} data-ready={ready > 0 || undefined} />
     </div>

@@ -21,6 +21,7 @@ import {
   type Eol,
   type FileData,
 } from './platform';
+import { dashLinesAsSeparators } from './editorText';
 import { useSettings, type ViewMode } from './settings';
 import { toast } from './toast';
 
@@ -815,7 +816,12 @@ export const useApp = create<AppStore>((set, get) => ({
     if (!doc || doc.kind === kind) return;
     if (doc.path) rememberKind(doc.path, kind);
     set((s) => ({
-      docs: s.docs.map((d) => (d.id === id ? { ...d, kind, mode: kind === 'markdown' ? 'read' : 'source', rev: d.rev + 1 } : d)),
+      docs: s.docs.map((d) => {
+        if (d.id !== id) return d;
+        // Plain text's `---` separator lines would otherwise turn the line above into a big heading.
+        const content = kind === 'markdown' && !d.readonly ? dashLinesAsSeparators(d.content) : d.content;
+        return { ...d, kind, content, mode: kind === 'markdown' ? 'read' : 'source', rev: d.rev + 1 };
+      }),
     }));
     void persistSession();
   },

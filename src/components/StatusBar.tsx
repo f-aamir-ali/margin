@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from 'motion/react';
 import { Check, CircleAlert, Lock, Minus, Moon, Plus, Sun } from 'lucide-react';
-import { useDeferredValue, useMemo, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { runCommand } from '../lib/commands';
 import { activeTheme, isDarkTheme, useSettings } from '../lib/settings';
 import { computeStats, formatMinutes } from '../lib/stats';
@@ -9,6 +9,19 @@ import { useView } from '../lib/viewSync';
 import { Menu, type MenuItem } from './ui/controls';
 
 const fmt = new Intl.NumberFormat('en-CA');
+
+/** Narrow windows (a vertical monitor, a snapped half) get the short line-ending and encoding labels. */
+const NARROW = '(max-width: 860px)';
+function useNarrow(): boolean {
+  const [narrow, setNarrow] = useState(() => window.matchMedia(NARROW).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(NARROW);
+    const on = () => setNarrow(mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
+  return narrow;
+}
 
 export function StatusBar({ doc }: { doc: Doc | null }) {
   const zoom = useApp((s) => s.zoom);
@@ -29,18 +42,18 @@ export function StatusBar({ doc }: { doc: Doc | null }) {
           <>
             <SaveState doc={doc} />
             <span className="status-item" data-tip={`${fmt.format(stats.chars)} characters · ${fmt.format(stats.lines)} lines`} data-tip-side="top">
-              {selectionWords > 0 ? `${fmt.format(selectionWords)} of ${fmt.format(stats.words)} words` : `${fmt.format(stats.words)} words`}
+              {selectionWords > 0 ? `${fmt.format(Math.min(selectionWords, stats.words))} of ${fmt.format(stats.words)} words` : `${fmt.format(stats.words)} words`}
             </span>
-            {doc.kind === 'markdown' && <span className="status-item status-dim">{formatMinutes(stats.minutes)}</span>}
+            {doc.kind === 'markdown' && <span className="status-item status-dim status-optional">{formatMinutes(stats.minutes)}</span>}
             {viewMode(doc) !== 'source' && stats.words > 0 && <span className="status-item status-dim status-num">{Math.round(progress * 100)}%</span>}
           </>
         )}
       </div>
       <div className="status-right">
         {doc && cursor && viewMode(doc) === 'source' && (
-          <button type="button" className="status-btn status-num" data-tip="Go to line" data-tip-keys="Ctrl+G" data-tip-side="top" onClick={() => runCommand('go.line')}>
+          <button type="button" className="status-btn status-num status-cursor" data-tip="Go to line" data-tip-keys="Ctrl+G" data-tip-side="top" onClick={() => runCommand('go.line')}>
             Ln {fmt.format(cursor.line)}, Col {fmt.format(cursor.col)}
-            {selectionChars > 0 && <span className="status-dim"> · {fmt.format(selectionChars)} selected</span>}
+            {selectionChars > 0 && <span className="status-dim status-optional"> · {fmt.format(selectionChars)} selected</span>}
           </button>
         )}
         {doc && <FormatMenus key={doc.id} doc={doc} />}
@@ -95,6 +108,13 @@ export function encodingLabel(encoding: string, bom: boolean): string {
   return encoding.startsWith('windows-') ? `ANSI (${encoding.replace('windows-', 'Windows-')})` : encoding;
 }
 
+/** Compact label for narrow windows (a vertical monitor): "UTF-8", "UTF-8 BOM", "ANSI", "UTF-16 LE". */
+function encodingShort(encoding: string, bom: boolean): string {
+  const full = encodingLabel(encoding, bom);
+  if (full.startsWith('ANSI')) return 'ANSI';
+  return full.replace(' with BOM', ' BOM');
+}
+
 const EOLS: { value: Eol; label: string; short: string }[] = [
   { value: '\r\n', label: 'Windows (CRLF)', short: 'CRLF' },
   { value: '\n', label: 'Unix (LF)', short: 'LF' },
@@ -107,6 +127,7 @@ function FormatMenus({ doc }: { doc: Doc }) {
   const eolRef = useRef<HTMLButtonElement>(null);
   const encodingRef = useRef<HTMLButtonElement>(null);
   const eol = doc.eol;
+  const narrow = useNarrow();
   const app = useApp.getState();
   const eolItems: MenuItem[] = EOLS.map((e) => ({ id: e.short, label: e.label, checked: e.value === eol, disabled: doc.readonly, run: () => app.setEol(doc.id, e.value) }));
   const encItems: MenuItem[] = [
@@ -130,13 +151,13 @@ function FormatMenus({ doc }: { doc: Doc }) {
     <>
       <div className="menu-anchor">
         <button ref={eolRef} type="button" className="status-btn" aria-haspopup="menu" aria-expanded={open === 'eol'} data-tip="Line endings" data-tip-side="top" onClick={() => setOpen(open === 'eol' ? null : 'eol')}>
-          {EOLS.find((e) => e.value === eol)?.label ?? 'CRLF'}
+          {narrow ? (EOLS.find((e) => e.value === eol)?.short ?? 'CRLF') : (EOLS.find((e) => e.value === eol)?.label ?? 'Windows (CRLF)')}
         </button>
         <AnimatePresence>{open === 'eol' && <Menu anchor={eolRef} side="top" items={eolItems} onClose={() => setOpen(null)} />}</AnimatePresence>
       </div>
       <div className="menu-anchor">
         <button ref={encodingRef} type="button" className="status-btn" aria-haspopup="menu" aria-expanded={open === 'enc'} data-tip={hasEncodingChange(doc) ? 'Encoding (changes on next save)' : 'Encoding'} data-tip-side="top" onClick={() => setOpen(open === 'enc' ? null : 'enc')}>
-          {encodingLabel(doc.encoding, doc.bom)}
+          {narrow ? encodingShort(doc.encoding, doc.bom) : encodingLabel(doc.encoding, doc.bom)}
         </button>
         <AnimatePresence>{open === 'enc' && <Menu anchor={encodingRef} side="top" items={encItems} onClose={() => setOpen(null)} />}</AnimatePresence>
       </div>

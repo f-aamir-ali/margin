@@ -14,13 +14,17 @@ import {
 import { useEffect, useRef } from 'react';
 import { cmHighlight as highlight, cmTheme as theme } from '../lib/cmTheme';
 import { useSettings } from '../lib/settings';
+import { countWords } from '../lib/stats';
 import { sourceApi } from '../lib/sourceApi';
 import { useApp, type Doc } from '../lib/store';
 import { useUi } from '../lib/ui';
-import { useView } from '../lib/viewSync';
+import { restoringScroll, useLongPage, useView } from '../lib/viewSync';
 
 /** Files that read best edge to edge: logs, data and anything with a recognised code language. */
 const WIDE_EXTENSIONS = ['log', 'csv', 'tsv', 'json', 'jsonc', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'env'];
+
+/** Where the caret was in each tab, so switching tabs and back puts it where it was (this session). */
+const caretByDoc = new Map<string, { anchor: number; head: number }>();
 
 function extOf(name: string): string {
   const i = name.lastIndexOf('.');
@@ -43,6 +47,7 @@ export function Source({ doc }: { doc: Doc }) {
   const codeLang = plain ? LanguageDescription.matchFilename(languages, doc.name) : null;
   const wide = plain && (!!codeLang || WIDE_EXTENSIONS.includes(extOf(doc.name)));
   const showNumbers = plain ? s.plainLineNumbers : s.sourceLineNumbers;
+  useLongPage(scrollerRef, doc.id);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -50,10 +55,13 @@ export function Source({ doc }: { doc: Doc }) {
     if (!host || !scroller) return;
     const st = useSettings.getState().settings;
     const numbers = plain ? st.plainLineNumbers : st.sourceLineNumbers;
+    const saved = caretByDoc.get(doc.id);
+    const clamp = (n: number) => Math.max(0, Math.min(n, doc.content.length));
     const view = new EditorView({
       parent: host,
       state: EditorState.create({
         doc: doc.content,
+        selection: saved ? { anchor: clamp(saved.anchor), head: clamp(saved.head) } : undefined,
         extensions: [
           gutters.current.of(numbers ? [lineNumbers(), highlightActiveLineGutter()] : []),
           wrap.current.of(st.sourceWrap ? EditorView.lineWrapping : []),
@@ -78,7 +86,7 @@ export function Source({ doc }: { doc: Doc }) {
               const text = sel.empty ? '' : u.state.sliceDoc(sel.from, sel.to);
               const line = u.state.doc.lineAt(sel.head);
               useView.getState().set({
-                selectionWords: text ? text.trim().split(/\s+/).filter(Boolean).length : 0,
+                selectionWords: text ? countWords(text) : 0,
                 selectionChars: text.length,
                 cursor: { line: line.number, col: sel.head - line.from + 1 },
               });
@@ -98,8 +106,22 @@ export function Source({ doc }: { doc: Doc }) {
       }).catch((error) => console.warn('Could not load syntax highlighting', error));
     }
 
-    const max = scroller.scrollHeight - scroller.clientHeight;
-    scroller.scrollTop = max > 0 ? doc.scroll * max : 0;
+    // Restore the scroll position. CodeMirror measures lines over the first frames, so apply it
+    // again then, and don't record positions until it has settled.
+    const target = doc.scroll;
+    const apply = () => {
+      const max = scroller.scrollHeight - scroller.clientHeight;
+      scroller.scrollTop = max > 0 ? target * max : 0;
+    };
+    if (target > 0) restoringScroll.add(doc.id);
+    apply();
+    let settleRaf = requestAnimationFrame(() => {
+      apply();
+      settleRaf = requestAnimationFrame(() => {
+        apply();
+        restoringScroll.delete(doc.id);
+      });
+    });
     let raf = 0;
     const onScroll = () => {
       if (raf) return;
@@ -107,18 +129,50 @@ export function Source({ doc }: { doc: Doc }) {
         raf = 0;
         const m = scroller.scrollHeight - scroller.clientHeight;
         const progress = m > 0 ? Math.min(1, scroller.scrollTop / m) : 0;
-        useApp.getState().setScroll(doc.id, progress);
+        if (!restoringScroll.has(doc.id)) useApp.getState().setScroll(doc.id, progress);
         useView.getState().set({ progress, activeHeading: -1 });
       });
     };
     scroller.addEventListener('scroll', onScroll, { passive: true });
     onScroll();
+
+    // Like Notepad: a click on the empty page below the text puts the caret at the very end;
+    // a click in the side margin lands on the nearest line.
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 0 || e.shiftKey || e.detail > 1) return;
+      const target = e.target as Element;
+      if (target.closest('.cm-gutters')) return;
+      const end = view.state.doc.length;
+      const endBox = view.coordsAtPos(end);
+      const below = !!endBox && e.clientY > endBox.bottom;
+      const inMargin = target === scroller || target === host;
+      if (!below && !inMargin) return;
+      let pos = end;
+      if (!below) {
+        const box = view.contentDOM.getBoundingClientRect();
+        const hit = view.posAtCoords({ x: Math.min(Math.max(e.clientX, box.left + 2), box.right - 2), y: e.clientY });
+        if (hit === null) return;
+        pos = hit;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+      view.focus();
+      view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
+    };
+    scroller.addEventListener('mousedown', onDown, true);
     view.focus();
-    useView.getState().set({ cursor: { line: 1, col: 1 }, selectionChars: 0 });
+    const head = view.state.selection.main.head;
+    const caretLine = view.state.doc.lineAt(head);
+    useView.getState().set({ cursor: { line: caretLine.number, col: head - caretLine.from + 1 }, selectionChars: 0 });
 
     return () => {
       alive = false;
+      cancelAnimationFrame(settleRaf);
+      restoringScroll.delete(doc.id);
+      const sel = view.state.selection.main;
+      caretByDoc.set(doc.id, { anchor: sel.anchor, head: sel.head });
       scroller.removeEventListener('scroll', onScroll);
+      scroller.removeEventListener('mousedown', onDown, true);
       if (raf) cancelAnimationFrame(raf);
       view.destroy();
       viewRef.current = null;

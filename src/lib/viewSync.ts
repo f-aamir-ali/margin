@@ -26,6 +26,13 @@ export const useView = create<ViewStore>((set) => ({
 
 const HEADINGS = 'h1, h2, h3, h4, h5, h6';
 
+/**
+ * Documents whose saved scroll position is still being restored. While a document lays out
+ * (markdown rendering, images, math, the editor building) the page is briefly too short, and
+ * the scroll events that causes must not overwrite the position the reader left it at.
+ */
+export const restoringScroll = new Set<string>();
+
 export function scrollBehavior(): ScrollBehavior {
   const s = useSettings.getState().settings;
   return s.smoothScroll && s.motion === 'full' ? 'smooth' : 'auto';
@@ -35,6 +42,31 @@ export function scrollBehavior(): ScrollBehavior {
 export function scrollToElement(scroller: HTMLElement, el: Element, offset = 28) {
   const top = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - offset;
   scroller.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior() });
+}
+
+/**
+ * Room under the last line (so the end of a long document can be read at eye level) only when
+ * the page is long enough to scroll. A short note doesn't scroll at all.
+ * Call before `useViewSync` so the restored scroll position is measured with the final padding.
+ */
+export function useLongPage(scrollerRef: RefObject<HTMLElement | null>, contentKey?: unknown) {
+  useLayoutEffect(() => {
+    const scroller = scrollerRef.current;
+    const content = scroller?.firstElementChild as HTMLElement | null | undefined;
+    if (!scroller || !content) return;
+    const check = () => {
+      const pad = parseFloat(getComputedStyle(scroller).paddingTop) || 0;
+      const long = content.offsetHeight + pad * 2 > scroller.clientHeight + 1;
+      if (long) scroller.dataset.long = '';
+      else delete scroller.dataset.long;
+    };
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(content);
+    ro.observe(scroller);
+    return () => ro.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contentKey]);
 }
 
 /**
@@ -54,14 +86,26 @@ export function useViewSync(
   useLayoutEffect(() => {
     const scroller = scrollerRef.current;
     if (!active || !scroller) return;
+    // Read once: the live value is rewritten as the page scrolls during layout.
+    const target = doc.scroll;
+    const id = doc.id;
     const apply = () => {
       const max = scroller.scrollHeight - scroller.clientHeight;
-      scroller.scrollTop = max > 0 ? doc.scroll * max : 0;
+      scroller.scrollTop = max > 0 ? target * max : 0;
     };
+    const settle = () => {
+      if (!restoringScroll.delete(id)) return;
+      const max = scroller.scrollHeight - scroller.clientHeight;
+      useApp.getState().setScroll(id, max > 0 ? Math.min(1, scroller.scrollTop / max) : 0);
+    };
+    if (target > 0) restoringScroll.add(id);
     apply();
     // Images, math and diagrams change the height after first paint: re-apply until the user scrolls.
     let userScrolled = false;
-    const stop = () => (userScrolled = true);
+    const stop = () => {
+      userScrolled = true;
+      settle();
+    };
     scroller.addEventListener('wheel', stop, { passive: true, once: true });
     scroller.addEventListener('pointerdown', stop, { passive: true, once: true });
     scroller.addEventListener('keydown', stop, { passive: true, once: true });
@@ -69,10 +113,14 @@ export function useViewSync(
       if (!userScrolled) apply();
     });
     if (contentRef.current) ro.observe(contentRef.current);
-    const t = setTimeout(() => ro.disconnect(), 2500);
+    const t = setTimeout(() => {
+      ro.disconnect();
+      settle();
+    }, 2500);
     return () => {
       clearTimeout(t);
       ro.disconnect();
+      restoringScroll.delete(id);
       scroller.removeEventListener('wheel', stop);
       scroller.removeEventListener('pointerdown', stop);
       scroller.removeEventListener('keydown', stop);
@@ -95,7 +143,7 @@ export function useViewSync(
       raf = 0;
       const max = scroller.scrollHeight - scroller.clientHeight;
       const progress = max > 0 ? Math.min(1, scroller.scrollTop / max) : 0;
-      useApp.getState().setScroll(doc.id, progress);
+      if (!restoringScroll.has(doc.id)) useApp.getState().setScroll(doc.id, progress);
       const line = scroller.getBoundingClientRect().top + 90;
       let active = -1;
       for (let i = 0; i < headings.length; i++) {

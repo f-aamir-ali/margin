@@ -1,4 +1,13 @@
-/* App chrome. Every interactive element: hover tint, 0.96 press, double-ring focus. */
+/* App chrome. One control material everywhere: a soft translucent tint on hover, a deeper tint
+   when pressed, and "on" states (active tab, mode, toggles) drawn like the tiles they sit on:
+   a hairline and the same top highlight, never a drop shadow. Presses don't shrink buttons. */
+
+:root {
+  --control-hover: color-mix(in srgb, var(--text) 6.5%, transparent);
+  --control-press: color-mix(in srgb, var(--text) 10%, transparent);
+  --control-on: color-mix(in srgb, var(--text) 9%, transparent);
+  --control-ring: inset 0 0 0 1px var(--line-2), inset 0 1px 0 var(--hl-top);
+}
 
 .app {
   --chrome-inset: var(--gap);
@@ -62,18 +71,16 @@
     box-shadow var(--t-med) var(--ease-out),
     opacity var(--t-fast) var(--ease-out);
 }
-.icon-btn:active,
 .btn:active,
 .welcome-action:active,
 .theme-card:active,
-.status-btn:active,
 .toast-action:active,
 .select-trigger:active {
-  scale: 0.96;
+  scale: 0.985;
 }
 .accent-dot:active,
 .switch:active {
-  scale: 0.92;
+  scale: 0.95;
 }
 .outline-item:active,
 .file-row:active,
@@ -107,11 +114,15 @@ button:disabled {
   color: var(--text-2);
 }
 .icon-btn:hover {
-  background: var(--raised);
+  background: var(--control-hover);
   color: var(--text);
 }
+.icon-btn:active {
+  background: var(--control-press);
+}
 .icon-btn[data-active] {
-  background: var(--raised);
+  background: var(--control-on);
+  box-shadow: var(--control-ring);
   color: var(--text);
 }
 
@@ -134,18 +145,18 @@ button:disabled {
   font-size: 12.5px;
 }
 .btn-soft {
-  background: var(--raised);
+  background: var(--control-on);
   color: var(--text);
-  box-shadow: inset 0 1px 0 var(--hl-top);
+  box-shadow: var(--control-ring);
 }
 .btn-soft:hover {
-  background: var(--raised-2);
+  background: var(--control-press);
 }
 .btn-ghost {
   color: var(--text-2);
 }
 .btn-ghost:hover {
-  background: var(--raised);
+  background: var(--control-hover);
   color: var(--text);
 }
 .btn-solid {
@@ -170,7 +181,7 @@ button:disabled {
   padding: 3px;
   gap: 2px;
   border-radius: 11px;
-  background: color-mix(in srgb, var(--bg) 70%, var(--tile));
+  background: color-mix(in srgb, var(--text) 3.5%, transparent);
   box-shadow: inset 0 0 0 1px var(--line);
 }
 .segmented-item {
@@ -192,15 +203,12 @@ button:disabled {
 .segmented-item[data-on] {
   color: var(--text);
 }
-.segmented-item:active .segmented-label {
-  scale: 0.95;
-}
 .segmented-thumb {
   position: absolute;
   inset: 0;
   border-radius: 8px;
-  background: var(--raised-2);
-  box-shadow: inset 0 1px 0 var(--hl-top), 0 1px 2px rgba(0, 0, 0, 0.25);
+  background: var(--control-on);
+  box-shadow: var(--control-ring);
 }
 .segmented-label {
   position: relative;
@@ -493,7 +501,7 @@ button:disabled {
   flex: none;
 }
 .tabs {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   height: 100%;
   display: flex;
@@ -509,19 +517,21 @@ button:disabled {
 .tabs::-webkit-scrollbar {
   display: none;
 }
+/* Outside the scrolling strip, so there is always room to drag the window. */
 .tabs-drag {
-  flex: 1;
-  min-width: 24px;
+  flex: 1 0 56px;
+  min-width: 56px;
   align-self: stretch;
 }
+/* Equal widths (Chrome, Windows 11 Notepad): every close button sits in a predictable place. */
 .tab {
   position: relative;
-  flex: none;
+  flex: 0 1 196px;
+  min-width: 76px;
   display: flex;
   align-items: center;
   gap: 4px;
   height: 30px;
-  max-width: 220px;
   padding: 0 4px 0 12px;
   border-radius: var(--r-sm);
   color: var(--text-3);
@@ -530,7 +540,7 @@ button:disabled {
 }
 .tab:hover {
   color: var(--text-2);
-  background: color-mix(in srgb, var(--raised) 55%, transparent);
+  background: var(--control-hover);
 }
 .tab[data-active='true'] {
   color: var(--text);
@@ -540,11 +550,16 @@ button:disabled {
   position: absolute;
   inset: 0;
   border-radius: var(--r-sm);
-  background: var(--raised);
-  box-shadow: inset 0 1px 0 var(--hl-top);
+  background: var(--control-on);
+  box-shadow: var(--control-ring);
+}
+.tabs[data-frozen] .tab {
+  flex: 0 0 var(--tab-frozen);
 }
 .tab-name {
   position: relative;
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -561,11 +576,8 @@ button:disabled {
   transition: background-color var(--t-fast), color var(--t-fast), scale 160ms var(--ease-out);
 }
 .tab-close:hover {
-  background: var(--raised-3);
+  background: var(--control-press);
   color: var(--text);
-}
-.tab-close:active {
-  scale: 0.88;
 }
 .tab-close svg {
   opacity: 0;
@@ -597,7 +609,7 @@ button:disabled {
   scale: 0;
 }
 .tab-new {
-  margin-left: 4px;
+  margin-left: 2px;
   width: 28px;
   height: 28px;
 }
@@ -624,8 +636,11 @@ button:disabled {
   color: var(--text-2);
 }
 .wc:hover {
-  background: var(--raised);
+  background: var(--control-hover);
   color: var(--text);
+}
+.wc:active {
+  background: var(--control-press);
 }
 .wc-close:hover {
   background: var(--window-close-bg);
@@ -914,7 +929,7 @@ button:disabled {
   inset: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 56px 44px 30vh;
+  padding: 56px 44px 56px;
   scrollbar-gutter: stable both-edges;
   user-select: text;
   cursor: auto;
@@ -945,27 +960,7 @@ button:disabled {
   padding-right: 28px;
 }
 .format-md {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 11px;
-  border-radius: var(--r-pill);
-  border: 1px solid var(--line-2);
-  color: var(--text-2);
-  font-size: 12.5px;
-  font-weight: 500;
-  transition:
-    background-color var(--t-fast) var(--ease-out),
-    color var(--t-fast) var(--ease-out),
-    scale var(--t-fast) var(--ease-out);
-}
-.format-md:hover {
-  background: var(--raised);
-  color: var(--text);
-}
-.format-md:active {
-  scale: 0.96;
+  color: var(--accent);
 }
 .dialog-hint {
   display: block;
@@ -973,7 +968,10 @@ button:disabled {
   color: var(--text-3);
 }
 
-.doc-scroller[data-typewriter] {
+.doc-scroller[data-long] {
+  padding-bottom: 30vh;
+}
+.doc-scroller[data-typewriter][data-long] {
   padding-bottom: 60vh;
 }
 .doc-scroller[data-mode='edit'] {
@@ -1144,6 +1142,23 @@ button:disabled {
 .status-num {
   min-width: 42px;
 }
+/* One line, always: the selection count sits beside Ln/Col, never under it. */
+.status-cursor {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
+/* Narrow windows (a vertical monitor, a snapped half): shorter labels, drop the extras. */
+@media (max-width: 860px) {
+  .status-optional {
+    display: none;
+  }
+}
+@media (max-width: 560px) {
+  .zoom {
+    display: none;
+  }
+}
 .status-btn,
 .status-save {
   height: 22px;
@@ -1157,8 +1172,12 @@ button:disabled {
 }
 .status-btn:hover,
 .status-save:hover {
-  background: var(--raised);
+  background: var(--control-hover);
   color: var(--text);
+}
+.status-btn:active,
+.status-save:active {
+  background: var(--control-press);
 }
 .status-save-inner {
   display: inline-flex;
@@ -1936,5 +1955,34 @@ section:first-child > .settings-group:first-child,
   }
   #print-root {
     display: block;
+  }
+}
+
+/* ---------- back to top ---------- */
+
+.scroll-top {
+  position: absolute;
+  right: 22px;
+  bottom: 20px;
+  z-index: 6;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--text);
+  background: color-mix(in srgb, var(--tile-2) 78%, transparent);
+  backdrop-filter: blur(18px) saturate(1.4);
+  box-shadow: inset 0 0 0 1px var(--line-2), var(--shadow-pop);
+  transition: background-color var(--t-fast) var(--ease-out);
+}
+.scroll-top:hover {
+  background: color-mix(in srgb, var(--raised-2) 90%, transparent);
+}
+
+/* Very narrow windows (a vertical monitor split, a snapped third): the page gets the room. */
+@media (max-width: 720px) {
+  .workspace > .sidebar {
+    display: none;
   }
 }

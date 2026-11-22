@@ -25,6 +25,7 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import { requestClose, requestQuit, runCommand, setMode } from '../lib/commands';
 import { appWindow, isProseName, isTauri } from '../lib/platform';
+import { attachSnapLayout } from '../lib/snapLayout';
 import type { ViewMode } from '../lib/settings';
 import { activeDoc, displayName, isDirty, useApp, type Doc } from '../lib/store';
 import { IconButton, Menu, Segmented, SPRING, type MenuItem } from './ui/controls';
@@ -38,6 +39,15 @@ export function Titlebar() {
   const menuRef = useRef<HTMLButtonElement>(null);
   const [maximized, setMaximized] = useState(false);
   const tabsRef = useRef<HTMLDivElement>(null);
+  const maximizeRef = useRef<HTMLButtonElement>(null);
+  // Windows 11: resting on Maximise shows the Snap Layouts flyout, as in every native app.
+  useEffect(() => (maximizeRef.current ? attachSnapLayout(maximizeRef.current) : undefined), []);
+  // While the pointer stays on the tab strip after closing a tab, tabs keep their width
+  // (as in Chrome), so the next tab's close button slides under the cursor.
+  // `pad` stands in for the closed tabs so the strip keeps its length: a scrolled strip would
+  // otherwise jump sideways when it gets shorter.
+  const [frozen, setFrozen] = useState<{ width: number; pad: number } | null>(null);
+  const frozenWidth = frozen?.width ?? null;
 
   useEffect(() => {
     let off: (() => void) | undefined;
@@ -47,9 +57,15 @@ export function Titlebar() {
     return () => off?.();
   }, []);
 
-  // Keep the active tab in view.
+  // Keep the active tab in view when it changes or a tab is added. Not when one closes:
+  // scrolling then would move the close button that is under the pointer.
+  const lastCount = useRef(docs.length);
   useEffect(() => {
+    const added = docs.length > lastCount.current;
+    lastCount.current = docs.length;
+    if (frozenWidth !== null && !added) return;
     tabsRef.current?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: 'smooth' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, docs.length]);
 
   const menuItems: MenuItem[] = [
@@ -82,39 +98,45 @@ export function Titlebar() {
         className="tabs"
         ref={tabsRef}
         values={docs}
+        data-frozen={frozenWidth !== null || undefined}
+        style={frozenWidth !== null ? ({ '--tab-frozen': `${frozenWidth}px` } as React.CSSProperties) : undefined}
         onReorder={(next: Doc[]) => useApp.setState({ docs: next })}
+        onPointerLeave={() => setFrozen(null)}
         onWheel={(e) => {
           if (e.deltaY !== 0 && tabsRef.current) tabsRef.current.scrollLeft += e.deltaY;
         }}
       >
-        <AnimatePresence initial={false}>
+        <AnimatePresence initial={false} mode="popLayout">
           {docs.map((d) => (
-            <Tab key={d.id} doc={d} active={d.id === activeId} />
+            <Tab key={d.id} doc={d} active={d.id === activeId} onCloseClick={(w) => setFrozen((f) => ({ width: f?.width ?? w, pad: (f?.pad ?? 0) + w + 2 }))} />
           ))}
         </AnimatePresence>
-        <IconButton label="New note" keys="Ctrl+N" className="tab-new" onClick={() => runCommand('file.new')}>
-          <Plus size={15} />
-        </IconButton>
-        <div className="tabs-drag" data-tauri-drag-region />
+        {frozen && <div className="tabs-hold" style={{ flex: `0 0 ${frozen.pad}px` }} aria-hidden />}
       </Reorder.Group>
+      {/* Outside the scrolling strip, so it never scrolls out of sight. */}
+      <IconButton label="New note" keys="Ctrl+N" className="tab-new" onClick={() => runCommand('file.new')}>
+        <Plus size={15} />
+      </IconButton>
+      {/* Always some empty title bar to drag the window by, however many tabs are open. */}
+      <div className="tabs-drag" data-tauri-drag-region />
 
       <div className="titlebar-right">
         {doc && doc.kind === 'text' && (!doc.path || isProseName(doc.name)) && (
-          <button type="button" className="format-md" data-tip="Show this file formatted, with Read and Edit" data-tip-side="bottom" onClick={() => runCommand('mode.formatMarkdown')}>
-            <Sparkles size={13} />
-            <span className="mode-text">Format as markdown</span>
-          </button>
+          <IconButton label="Format as markdown" className="format-md" onClick={() => runCommand('mode.formatMarkdown')}>
+            <Sparkles size={16} />
+          </IconButton>
         )}
         {doc && doc.kind === 'markdown' && (
           <Segmented<ViewMode>
             ariaLabel="View mode"
             size="sm"
+            tipSide="bottom"
             value={doc.mode}
             onChange={setMode}
             options={[
-              { value: 'read', label: <ModeLabel icon={<BookOpen size={14} />} text="Read" />, title: 'Reading mode', keys: 'Ctrl+E' },
-              { value: 'edit', label: <ModeLabel icon={<PencilLine size={14} />} text="Edit" />, title: 'Editing mode', keys: 'Ctrl+E' },
-              { value: 'source', label: <ModeLabel icon={<Code2 size={14} />} text="Source" />, title: 'Markdown source', keys: 'Ctrl+/' },
+              { value: 'read', label: <BookOpen size={15} />, title: 'Read', keys: 'Ctrl+E' },
+              { value: 'edit', label: <PencilLine size={15} />, title: 'Edit', keys: 'Ctrl+E' },
+              { value: 'source', label: <Code2 size={15} />, title: 'Source', keys: 'Ctrl+/' },
             ]}
           />
         )}
@@ -129,7 +151,7 @@ export function Titlebar() {
             <button type="button" className="wc" aria-label="Minimise" onClick={() => void appWindow.minimize()}>
               <Minus size={15} />
             </button>
-            <button type="button" className="wc" aria-label={maximized ? 'Restore' : 'Maximise'} onClick={() => void appWindow.toggleMaximize()}>
+            <button ref={maximizeRef} type="button" className="wc" aria-label={maximized ? 'Restore' : 'Maximise'} onClick={() => void appWindow.toggleMaximize()}>
               {maximized ? <Copy size={12} style={{ transform: 'scaleX(-1)' }} /> : <Square size={12} />}
             </button>
             <button type="button" className="wc wc-close" aria-label="Close" onClick={() => void requestQuit()}>
@@ -142,16 +164,7 @@ export function Titlebar() {
   );
 }
 
-function ModeLabel({ icon, text }: { icon: React.ReactNode; text: string }) {
-  return (
-    <>
-      {icon}
-      <span className="mode-text">{text}</span>
-    </>
-  );
-}
-
-function Tab({ doc, active }: { doc: Doc; active: boolean }) {
+function Tab({ doc, active, onCloseClick }: { doc: Doc; active: boolean; onCloseClick: (width: number) => void }) {
   const dirty = isDirty(doc);
   const activate = useApp((s) => s.activate);
   return (
@@ -162,9 +175,9 @@ function Tab({ doc, active }: { doc: Doc; active: boolean }) {
       data-active={active}
       data-dirty={dirty || undefined}
       title={doc.path ?? displayName(doc)}
-      initial={{ opacity: 0, scale: 0.9, width: 0 }}
-      animate={{ opacity: 1, scale: 1, width: 'auto' }}
-      exit={{ opacity: 0, scale: 0.9, width: 0, transition: { duration: 0.16 } }}
+      initial={{ opacity: 0, scale: 0.94 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.94, transition: { duration: 0.12 } }}
       transition={SPRING}
       whileDrag={{ scale: 1.03, zIndex: 5 }}
       onPointerDown={(e) => {
@@ -183,6 +196,8 @@ function Tab({ doc, active }: { doc: Doc; active: boolean }) {
         onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation();
+          // A real mouse click (not the keyboard): hold the tab widths still.
+          if (e.detail > 0) onCloseClick((e.currentTarget.parentElement as HTMLElement).getBoundingClientRect().width);
           requestClose(doc.id);
         }}
       >
