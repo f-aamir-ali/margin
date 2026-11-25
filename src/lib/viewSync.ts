@@ -103,12 +103,19 @@ export function useViewSync(
     // Images, math and diagrams change the height after first paint: re-apply until the user scrolls.
     let userScrolled = false;
     const stop = () => {
+      if (userScrolled) return;
       userScrolled = true;
       settle();
     };
+    // Holding Ctrl after Ctrl+Tab repeats Ctrl key events: those (and Tab, Shift, Alt) aren't the
+    // reader moving, so they must not end the restore while the page is still laying out.
+    const onKey = (e: KeyboardEvent) => {
+      if (['Control', 'Shift', 'Alt', 'Meta', 'Tab', 'CapsLock'].includes(e.key) || (e.ctrlKey && /^\d$/.test(e.key))) return;
+      stop();
+    };
     scroller.addEventListener('wheel', stop, { passive: true, once: true });
     scroller.addEventListener('pointerdown', stop, { passive: true, once: true });
-    scroller.addEventListener('keydown', stop, { passive: true, once: true });
+    scroller.addEventListener('keydown', onKey, { passive: true });
     const ro = new ResizeObserver(() => {
       if (!userScrolled) apply();
     });
@@ -123,7 +130,7 @@ export function useViewSync(
       restoringScroll.delete(id);
       scroller.removeEventListener('wheel', stop);
       scroller.removeEventListener('pointerdown', stop);
-      scroller.removeEventListener('keydown', stop);
+      scroller.removeEventListener('keydown', onKey);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, doc.id, contentKey]);
@@ -145,10 +152,17 @@ export function useViewSync(
       const progress = max > 0 ? Math.min(1, scroller.scrollTop / max) : 0;
       if (!restoringScroll.has(doc.id)) useApp.getState().setScroll(doc.id, progress);
       const line = scroller.getBoundingClientRect().top + 90;
+      // Headings run down the page in order: binary search for the last one above the line,
+      // so a long outline costs a handful of measurements per frame, not hundreds.
+      let lo = 0;
+      let hi = headings.length - 1;
       let active = -1;
-      for (let i = 0; i < headings.length; i++) {
-        if (headings[i].getBoundingClientRect().top <= line) active = i;
-        else break;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (headings[mid].getBoundingClientRect().top <= line) {
+          active = mid;
+          lo = mid + 1;
+        } else hi = mid - 1;
       }
       // At the very bottom the last heading may never reach the line: select it anyway.
       if (max > 0 && scroller.scrollTop >= max - 2 && headings.length) active = headings.length - 1;

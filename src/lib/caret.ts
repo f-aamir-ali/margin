@@ -2,6 +2,9 @@
    The native caret is hidden while this one is confident about where it should be;
    whenever it is not (odd selections, widgets), the native caret comes straight back. */
 
+/** Slant of the italic faces the editor uses. The caret leans this far so it runs along the letters. */
+const ITALIC_ANGLE = 12;
+
 function caretRect(sel: Selection): DOMRect | null {
   const range = sel.getRangeAt(0);
   const rects = range.getClientRects();
@@ -48,6 +51,32 @@ function emptyBlockRect(el: Element): DOMRect | null {
   return new DOMRect(rtl ? r.right - padL : r.left + padL, r.top + padT, 0, Math.min(lh, r.height));
 }
 
+/** The caret of the current collapsed selection in client coordinates, or null when there is none. */
+export function selectionCaretRect(): DOMRect | null {
+  const sel = document.getSelection();
+  if (!sel || !sel.rangeCount || !sel.isCollapsed) return null;
+  return caretRect(sel);
+}
+
+function isItalicNode(n: Node | null): boolean {
+  if (!n) return false;
+  const el = n.nodeType === Node.ELEMENT_NODE ? (n as Element) : n.parentElement;
+  return !!el && getComputedStyle(el).fontStyle === 'italic';
+}
+
+/**
+ * True when the glyph just before the caret is italic, so the caret should lean with its right edge. Only that glyph
+ * counts: leaning towards an italic glyph after the caret put the caret on top of its stem (more ink under it, not less).
+ */
+function italicBeforeCaret(sel: Selection): boolean {
+  const node = sel.anchorNode;
+  if (!node) return false;
+  if (node.nodeType === Node.TEXT_NODE) {
+    return sel.anchorOffset > 0 ? isItalicNode(node) : isItalicNode(node.previousSibling);
+  }
+  return isItalicNode((node as Element).childNodes[sel.anchorOffset - 1] ?? null);
+}
+
 export function attachSmoothCaret(scroller: HTMLElement, pm: HTMLElement): () => void {
   const caret = document.createElement('div');
   caret.className = 'smooth-caret';
@@ -67,8 +96,13 @@ export function attachSmoothCaret(scroller: HTMLElement, pm: HTMLElement): () =>
   const hide = () => {
     pm.classList.remove('has-smooth-caret');
     caret.dataset.visible = 'false';
+    caret.dataset.blink = 'false';
+    clearTimeout(blinkTimer);
     first = true;
   };
+
+  // Like the native caret, this one is shown only while the window and the document have focus.
+  const hasFocus = () => document.hasFocus() && document.visibilityState === 'visible';
 
   const update = () => {
     raf = 0;
@@ -76,6 +110,7 @@ export function attachSmoothCaret(scroller: HTMLElement, pm: HTMLElement): () =>
     const anchor = sel?.anchorNode ?? null;
     const anchorEl = anchor instanceof Element ? anchor : anchor?.parentElement ?? null;
     if (
+      !hasFocus() ||
       !sel ||
       !sel.rangeCount ||
       !sel.isCollapsed ||
@@ -104,7 +139,10 @@ export function attachSmoothCaret(scroller: HTMLElement, pm: HTMLElement): () =>
       first = false;
       requestAnimationFrame(() => (caret.style.transition = ''));
     }
-    caret.style.transform = `translate3d(${x.toFixed(2)}px, ${y.toFixed(2)}px, 0)`;
+    // Next to italic glyphs the caret leans with them. The transform origin is the caret's foot, on the baseline,
+    // so the foot stays where the upright caret would be and only the top moves, along the letters.
+    const lean = italicBeforeCaret(sel) ? ` skewX(${-ITALIC_ANGLE}deg)` : '';
+    caret.style.transform = `translate3d(${x.toFixed(2)}px, ${y.toFixed(2)}px, 0)${lean}`;
     caret.style.height = `${h.toFixed(2)}px`;
     caret.dataset.visible = 'true';
     pm.classList.add('has-smooth-caret');
@@ -123,6 +161,9 @@ export function attachSmoothCaret(scroller: HTMLElement, pm: HTMLElement): () =>
   pm.addEventListener('input', schedule);
   pm.addEventListener('focusin', schedule);
   pm.addEventListener('focusout', schedule);
+  window.addEventListener('focus', schedule);
+  window.addEventListener('blur', schedule);
+  document.addEventListener('visibilitychange', schedule);
   window.addEventListener('resize', schedule);
   const ro = new ResizeObserver(schedule);
   ro.observe(pm);
@@ -132,6 +173,9 @@ export function attachSmoothCaret(scroller: HTMLElement, pm: HTMLElement): () =>
     pm.removeEventListener('input', schedule);
     pm.removeEventListener('focusin', schedule);
     pm.removeEventListener('focusout', schedule);
+    window.removeEventListener('focus', schedule);
+    window.removeEventListener('blur', schedule);
+    document.removeEventListener('visibilitychange', schedule);
     window.removeEventListener('resize', schedule);
     ro.disconnect();
     if (raf) cancelAnimationFrame(raf);

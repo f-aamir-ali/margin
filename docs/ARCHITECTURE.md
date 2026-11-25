@@ -29,7 +29,7 @@ In Read, headings open in place and web links go to the default browser. Relativ
 - The WYSIWYG editor always re-serialises markdown (bullets, table padding, setext → ATX…). `Editor.tsx` captures the untouched ProseMirror document as a **baseline** and delays serialising it until the first real edit. Output that matches the baseline restores the original bytes, including after undo.
 - Adapters in `lib/editorText.ts`:
   - `toEditor`: rewrites `$$x$$` / `$$\begin…` so `$$` sits on its own line (the editor otherwise reads an unterminated block that swallows the rest of the document).
-  - `fromEditor`: un-escapes `> [!NOTE]` alerts and `[toc]`, drops the editor's `<br />` empty-paragraph placeholders.
+  - `fromEditor`: un-escapes `> [!NOTE]` alerts and `[toc]` and drops the editor's `<br />` empty-paragraph placeholders, line by line and never inside a fenced code block. `splitFrontMatter` uses the same rule as Read. `extractDataImages` turns images pasted into an untitled note into files on its first Save As.
 - Front matter is cut off before the editor sees it and glued back on output. Both editors honour the document's selected line ending, even before it has a newline.
 - Encodings: Rust decodes any file (`encoding_rs` + `chardetng`: BOM, then UTF-8, then the likeliest legacy code page) and returns `encoding` + `bom`; saving encodes back the same way and refuses (`UNMAPPABLE:`) rather than writing escapes. Mixed line endings are normalised to the majority on read (`normaliseEol` in `platform.ts`); `Source.tsx` declares CRLF/CR to CodeMirror so it never converts them. Files with NUL bytes are refused (`BINARY:`) unless opened anyway, then read-only.
 - `lib/editorMarks.ts`: adds `==highlight==` and `^sup^` marks, and replaces Crepe's image-block schema, which otherwise overwrites image alt text with a display ratio.
@@ -46,7 +46,14 @@ In Read, headings open in place and web links go to the default browser. Relativ
 - `session.json` (version 2) lists tab ids in order, active id, mode, kind, encoding. On launch each tab is rebuilt from its file plus its draft. A file draft stores `savedHash` (hash of the disk text it was based on): if the file changed while Margin was closed, the draft is shown and a conflict toast offers the disk version. Drafts the session doesn't list are restored at the end; unreadable ones are renamed `.bad`.
 - Closing the window flushes drafts and the session before destroying it. If a write fails, Margin reports the failure and keeps the window open. Closing a tab prompts if dirty; closed tabs (with unsaved text) go to the `closed` store key (20 kept, 30 days) for Ctrl+Shift+T.
 - Untitled tabs are named after their first line (`noteTitle` / `displayName`).
-- Second launch: `open-files` with paths opens them; with none (Win+R `note` while running) gives a blank note (`newDocIfNeeded`).
+- Second launch: see `open-files` below; with no files (Win+R `note` while running) it gives a blank note (`newDocIfNeeded`).
+
+## Saving safely (the third core rule)
+- Every file tab remembers the disk `version` its `saved` text came from. `save` sends it; if another program changed the file, Rust refuses with `CONFLICT:` and the tab is marked `conflict`. A tab whose file was missing or unreadable sends `absent`, so a file that has reappeared is never overwritten unseen.
+- Conflicts resolve through `resolveConflict(id, how)` (status bar menu): `compare` opens the disk version as a read-only `transient` tab, `overwrite` saves with `force`, `disk` takes the file's text after putting yours in closed tabs, `copy` is Save As. Reload over unsaved edits goes through `disk` too.
+- Restore distinguishes `NOTFOUND` (tab `missing`) from any other read error (tab `diskError`, Retry via `retryDisk`). `canAutosave` refuses conflict, missing, unreadable, lossy, binary and transient tabs. Autosave runs per document in the store, so background tabs are saved.
+- Closing a tab writes the closed-tab history (strict, serialised) before deleting its draft; if that write fails the draft stays and comes back next start. History is capped at 20 entries / 8 MB. Only one writable tab per file (`pathKey`); duplicates become "(recovered)" untitled copies.
+- Startup validates every draft and session record (`cleanDraft`, `cleanTab`), reads tabs 6 at a time, and `main.tsx` always shows a window even if restore throws.
 
 ## State (zustand)
 - `lib/store.ts` `useApp`: documents/tabs, recents, closed tabs, sidebar, zoom, drafts and session persistence (`session`, `recents`, `closed`, `file-kinds`, `zoom` keys + `drafts/`).
@@ -56,8 +63,8 @@ In Read, headings open in place and web links go to the default browser. Relativ
 - `lib/commands.ts`: every command with its shortcut. The palette, menus, shortcut list in Settings and the global key handler all read this one list.
 
 ## Rust commands (all in `src-tauri/src`)
-`read_file` (optional `encoding`, `force`), `write_file` (optional `encoding`, `bom`; atomic temp + rename; its own writes are hidden from the watcher), `write_binary`, `list_dir`, `file_meta`, `reveal_in_explorer`, `watch_file`, `unwatch_file`, `store_get`, `store_set` (JSON files in the app config dir), `draft_write`, `draft_delete`, `draft_list`, `launch_files`, `app_info`, `set_window_theme`, `open_external`.
-Events to the UI: `open-files` (`string[]`, from a second launch; empty = new note) and `file-changed` (`{ path, kind }`).
+`read_file` (optional `encoding`, `force`; returns `version` = size:mtime-ns, `lossy`, and typed errors `NOTFOUND:` / `TOOBIG:` / `BINARY:`), `write_file` (optional `encoding`, `bom`, `expected` version and `force`; refuses with `CONFLICT:` when the file moved on, `UNMAPPABLE:` when the encoding can't hold a character; temp file + `ReplaceFileW` on Windows so attributes, ACLs and streams survive; writes through symlinks to the target), `write_binary`, `list_dir`, `list_files` (recursive name search for the palette), `file_meta`, `reveal_in_explorer`, `open_linked_file`, `watch_file` / `unwatch_file`, `store_get` / `store_set`, `draft_write` / `draft_delete` / `draft_list` (records without string `content` or a matching `id` are quarantined as `.bad`), `launch_files`, `take_open_requests`, `app_info`, `set_window_theme`, `show_snap_layout`, `open_external`.
+Events to the UI: `open-files` (a ping: later launches queue their file lists in Rust and the UI drains them with `take_open_requests`, so none are lost during startup; an empty list = new note), `file-changed` (`{ path, kind }`; Margin's own write is ignored only while the file is still the version it wrote) and `context-menu-route` (`{ native }`: `spell_menu.rs` lets the native WebView2 menu show for a misspelled word, because WebView2 doesn't give suggestion text to page menus; every other right-click gets `ContextMenu.tsx`).
 Config dir: `%APPDATA%\com.faamirali.margin`. On first launch `drafts::migrate_from_old_identifier` copies `com.faamirali.mdviewer` across (old folder left alone).
 
 ## Windows integration (installer)
@@ -76,4 +83,5 @@ Config dir: `%APPDATA%\com.faamirali.margin`. On first launch `drafts::migrate_f
 - `npx vitest run`: renderer, editor text adapters, store helpers (titles, hashing, line endings).
 - `cargo test` in `src-tauri`: encodings (ANSI round trip, UTF-16, BOM, refusals), binary detection, drafts (round trip, quarantine), config migration, atomic write, dir listing, store keys, CLI args.
 - `node tools/e2e/real.mjs` (repo root, after building with `tools/e2e/tauri.test.json`): drives a release build over WebView2's debug port. Covers window controls, both format menus, disk bytes and encoding after restart, hot exit, find and replace, file watching, Markdown editing, and attachment handling. The harness verifies the separate profile before driving the app and only kills the processes it starts.
+- `node tools/e2e/bench.mjs`: cold start (blank, long.md, 20 MB log), Ctrl+Tab switch, first Edit, keystroke-to-frame latency, save acknowledgement and process-tree memory, median and p95.
 - `node tools/e2e/probe-notepad.mjs`: code colouring, Ctrl+G, F5, Alt+Z, binary prompt, 20 MB log (opens in ~0.5 s), theme screenshots to `%TEMP%\margin-probe` (10 checks). `probe-hotexit.mjs` and `probe-marks.mjs` are small focused probes used to diagnose failures.

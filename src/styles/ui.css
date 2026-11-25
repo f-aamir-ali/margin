@@ -505,7 +505,27 @@ button:disabled {
   gap: 6px;
   flex: none;
 }
+/* The strip's natural width is the sum of its tabs' fixed widths, never their titles. That keeps
+   the strip and every tab still while a title changes (typing in an untitled note). */
+.tabs-wrap {
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  --fade: 28px;
+  --edge-l: var(--text);
+  --edge-r: var(--text);
+}
+.tabs-wrap[data-overflow-left] {
+  --edge-l: transparent;
+}
+.tabs-wrap[data-overflow-right] {
+  --edge-r: transparent;
+}
 .tabs {
+  --tab-w: 196px;
+  --tab-min: 120px;
   flex: 0 1 auto;
   min-width: 0;
   height: 100%;
@@ -518,9 +538,51 @@ button:disabled {
   list-style: none;
   margin: 0;
   padding: 0;
+  /* Hidden tabs fade out at an edge that has more behind it. The mask only uses alpha. */
+  mask-image: linear-gradient(to right, var(--edge-l) 0, var(--text) var(--fade), var(--text) calc(100% - var(--fade)), var(--edge-r) 100%);
 }
 .tabs::-webkit-scrollbar {
   display: none;
+}
+/* Scroll buttons sit over the strip's edges. Hidden (and not clickable) unless that edge has tabs past it. */
+.tabs-nav {
+  position: absolute;
+  top: 50%;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
+  translate: 0 -50%;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--text-2);
+  background: color-mix(in srgb, var(--tile) 84%, transparent);
+  box-shadow: var(--control-ring);
+  backdrop-filter: blur(10px);
+  opacity: 0;
+  scale: 0.6;
+  pointer-events: none;
+  transition:
+    opacity var(--t-fast) var(--ease-out),
+    scale 320ms var(--ease-spring),
+    background-color var(--t-fast),
+    color var(--t-fast);
+}
+.tabs-nav:hover {
+  color: var(--text);
+  background: var(--tile-2);
+}
+.tabs-nav-left {
+  left: 4px;
+}
+.tabs-nav-right {
+  right: 4px;
+}
+.tabs-wrap[data-overflow-left] .tabs-nav-left,
+.tabs-wrap[data-overflow-right] .tabs-nav-right {
+  opacity: 1;
+  scale: 1;
+  pointer-events: auto;
 }
 /* Outside the scrolling strip, so there is always room to drag the window. */
 .tabs-drag {
@@ -531,8 +593,9 @@ button:disabled {
 /* Equal widths (Chrome, Windows 11 Notepad): every close button sits in a predictable place. */
 .tab {
   position: relative;
-  flex: 0 1 196px;
-  min-width: 76px;
+  flex: 0 1 var(--tab-w);
+  width: var(--tab-w);
+  min-width: var(--tab-min);
   display: flex;
   align-items: center;
   gap: 4px;
@@ -551,15 +614,10 @@ button:disabled {
   color: var(--text);
   background: none;
 }
-/* Tabs are not focusable themselves: keyboard focus lands on the close button, and the tab shows the ring. */
-.tab:has(:focus-visible),
 .tab:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
   border-radius: var(--r-sm);
-}
-.tab-close:focus-visible {
-  box-shadow: inset 0 0 0 1.5px var(--accent);
 }
 .tab-bg {
   position: absolute;
@@ -569,6 +627,7 @@ button:disabled {
   box-shadow: var(--control-ring);
 }
 .tabs[data-frozen] .tab {
+  width: var(--tab-frozen);
   flex: 0 0 var(--tab-frozen);
 }
 .tab-name {
@@ -623,7 +682,10 @@ button:disabled {
 .tab[data-dirty] .tab-close:hover .tab-dot {
   scale: 0;
 }
+/* Always above the strip, so nothing dragged or animating can paint over it. */
 .tab-new {
+  position: relative;
+  z-index: 2;
   margin-left: 2px;
   width: 28px;
   height: 28px;
@@ -1005,6 +1067,39 @@ button:disabled {
   }
 }
 
+/* Shown over the top of a note whose internet images are blocked. */
+.remote-bar {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 5;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: calc(100% - 32px);
+  padding: 5px 6px 5px 14px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--tile) 84%, transparent);
+  backdrop-filter: blur(14px) saturate(1.2);
+  color: var(--text-2);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.remote-bar-action {
+  padding: 3px 11px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font: inherit;
+  cursor: pointer;
+}
+.remote-bar-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .doc-empty {
   position: absolute;
   inset: 0;
@@ -1207,8 +1302,14 @@ button:disabled {
 .status-save[data-state='new'] {
   color: var(--text-2);
 }
-.status-save[data-state='conflict'] {
+.status-save[data-state='conflict'],
+.status-save[data-state='unsafe'],
+.status-save[data-state='unreadable'],
+.status-save[data-state='missing'] {
   color: var(--warn-text);
+}
+.status-save[data-state='compare'] {
+  color: var(--text-2);
 }
 .status-dot {
   width: 6px;

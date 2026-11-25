@@ -2144,7 +2144,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "margin"
-version = "0.2.5"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "chardetng",
@@ -2161,6 +2161,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
  "tempfile",
+ "webview2-com",
  "windows",
 ]
 

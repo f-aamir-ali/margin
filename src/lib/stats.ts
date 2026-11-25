@@ -5,6 +5,9 @@ export interface DocStats {
   minutes: number;
 }
 
+/** Longer texts (in characters) are counted off the UI thread, and their editors report edits in batches. */
+export const LARGE_DOC_CHARS = 200_000;
+
 const WORD = /[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu;
 const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
 

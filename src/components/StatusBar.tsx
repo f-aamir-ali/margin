@@ -1,9 +1,10 @@
 import { AnimatePresence, motion } from 'motion/react';
 import { Check, CircleAlert, Lock, Minus, Moon, Plus, Sun } from 'lucide-react';
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { runCommand } from '../lib/commands';
 import { activeTheme, isDarkTheme, useSettings } from '../lib/settings';
-import { computeStats, formatMinutes } from '../lib/stats';
+import { formatMinutes } from '../lib/stats';
+import { useDocStats } from '../lib/useDocStats';
 import { hasEncodingChange, isDirty, useApp, viewMode, type Doc, type Eol } from '../lib/store';
 import { useView } from '../lib/viewSync';
 import { Menu, type MenuItem } from './ui/controls';
@@ -28,8 +29,7 @@ export function StatusBar({ doc }: { doc: Doc | null }) {
   const settings = useSettings((s) => s.settings);
   const systemDark = useSettings((s) => s.systemDark);
   const dark = isDarkTheme(activeTheme(settings, systemDark));
-  const content = useDeferredValue(doc?.content ?? '');
-  const stats = useMemo(() => computeStats(content, doc?.kind === 'text'), [content, doc?.kind]);
+  const stats = useDocStats(doc?.content ?? '', doc?.kind === 'text');
   const progress = useView((s) => s.progress);
   const selectionWords = useView((s) => s.selectionWords);
   const selectionChars = useView((s) => s.selectionChars);
@@ -166,47 +166,93 @@ function FormatMenus({ doc }: { doc: Doc }) {
 }
 
 function SaveState({ doc }: { doc: Doc }) {
+  const draftTrouble = useApp((s) => s.draftTrouble);
+  const [menu, setMenu] = useState(false);
+  const ref = useRef<HTMLButtonElement>(null);
   const dirty = isDirty(doc);
-  const state = doc.readonly ? 'readonly' : doc.conflict ? 'conflict' : dirty ? (doc.path ? 'dirty' : 'new') : doc.path ? 'saved' : 'scratch';
-  const label = { readonly: 'Read-only', conflict: 'Changed on disk', dirty: 'Unsaved', saved: 'Saved', new: 'Draft', scratch: doc.content ? 'Scratch copy' : 'New note' }[state];
+  const state = doc.transient
+    ? 'compare'
+    : doc.diskError
+      ? 'unreadable'
+      : doc.readonly
+        ? 'readonly'
+        : doc.conflict
+          ? 'conflict'
+          : dirty && draftTrouble
+            ? 'unsafe'
+            : dirty
+              ? (doc.path ? (doc.missing ? 'missing' : 'dirty') : 'new')
+              : doc.path
+                ? 'saved'
+                : 'scratch';
+  const label = {
+    compare: 'Version on disk',
+    unreadable: "Can't read file",
+    readonly: 'Read-only',
+    conflict: 'Changed on disk',
+    unsafe: 'Not backed up',
+    missing: 'File missing',
+    dirty: 'Unsaved',
+    new: 'Draft',
+    saved: 'Saved',
+    scratch: doc.content ? 'Scratch copy' : 'New note',
+  }[state];
   // Hot exit makes "unsaved" safe: say so where the worry would be.
-  const tip =
-    state === 'dirty'
-      ? 'Kept safe even if you close Margin. Save to write the file.'
-      : state === 'new'
-        ? 'Kept safe even if you close Margin. Save to put it in a file.'
-        : state === 'conflict'
-          ? "Use the file's version. Yours stays in closed tabs (Ctrl+Shift+T)."
-          : undefined;
+  const tip = {
+    compare: 'Read-only copy of the file on disk, for comparing. Close it when done.',
+    unreadable: `${doc.diskError ?? ''} Click to try again.`,
+    readonly: undefined,
+    conflict: 'Another program changed this file. Click to choose which version to keep.',
+    unsafe: `Your unsaved text couldn't be written to the drafts folder: ${draftTrouble ?? ''} Save it to a file to be safe.`,
+    missing: 'The file was moved or deleted. Save to write it back.',
+    dirty: 'Kept safe even if you close Margin. Save to write the file.',
+    new: 'Kept safe even if you close Margin. Save to put it in a file.',
+    saved: undefined,
+    scratch: undefined,
+  }[state];
+  const app = useApp.getState();
+  const conflictItems: MenuItem[] = [
+    { id: 'compare', label: 'Compare with the file on disk', run: () => void app.resolveConflict(doc.id, 'compare') },
+    { id: 'mine', label: 'Keep mine (overwrite the file)', run: () => void app.resolveConflict(doc.id, 'overwrite') },
+    { id: 'disk', label: "Use the file's version (yours goes to closed tabs)", run: () => void app.resolveConflict(doc.id, 'disk') },
+    { id: 'copy', label: 'Save mine as a copy…', separatorBefore: true, run: () => void app.resolveConflict(doc.id, 'copy') },
+  ];
   return (
-    <button
-      type="button"
-      className="status-item status-save"
-      data-state={state}
-      data-tip={tip}
-      data-tip-keys={state === 'dirty' || state === 'new' ? 'Ctrl+S' : undefined}
-      data-tip-side="top"
-      onClick={() => {
-        if (state === 'dirty' || state === 'new') runCommand('file.save');
-        else if (state === 'conflict') runCommand('file.reload');
-      }}
-    >
-      <AnimatePresence mode="wait" initial={false}>
-        <motion.span
-          key={state}
-          className="status-save-inner"
-          initial={{ opacity: 0, y: 5 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -5 }}
-          transition={{ duration: 0.14 }}
-        >
-          {state === 'saved' && <Check size={12} />}
-          {state === 'readonly' && <Lock size={12} />}
-          {state === 'conflict' && <CircleAlert size={12} />}
-          {(state === 'dirty' || state === 'new') && <span className="status-dot" />}
-          {label}
-        </motion.span>
-      </AnimatePresence>
-    </button>
+    <div className="menu-anchor">
+      <button
+        ref={ref}
+        type="button"
+        className="status-item status-save"
+        data-state={state}
+        data-tip={menu ? undefined : tip}
+        data-tip-keys={state === 'dirty' || state === 'new' || state === 'missing' || state === 'unsafe' ? 'Ctrl+S' : undefined}
+        data-tip-side="top"
+        aria-haspopup={state === 'conflict' ? 'menu' : undefined}
+        aria-expanded={state === 'conflict' ? menu : undefined}
+        onClick={() => {
+          if (state === 'dirty' || state === 'new' || state === 'missing' || state === 'unsafe') runCommand('file.save');
+          else if (state === 'conflict') setMenu((m) => !m);
+          else if (state === 'unreadable') void app.retryDisk(doc.id);
+        }}
+      >
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.span
+            key={state}
+            className="status-save-inner"
+            initial={{ opacity: 0, y: 5 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -5 }}
+            transition={{ duration: 0.14 }}
+          >
+            {state === 'saved' && <Check size={12} />}
+            {(state === 'readonly' || state === 'compare') && <Lock size={12} />}
+            {(state === 'conflict' || state === 'unreadable' || state === 'unsafe' || state === 'missing') && <CircleAlert size={12} />}
+            {(state === 'dirty' || state === 'new') && <span className="status-dot" />}
+            {label}
+          </motion.span>
+        </AnimatePresence>
+      </button>
+      <AnimatePresence>{menu && state === 'conflict' && <Menu anchor={ref} side="top" align="left" items={conflictItems} onClose={() => setMenu(false)} />}</AnimatePresence>
+    </div>
   );
 }

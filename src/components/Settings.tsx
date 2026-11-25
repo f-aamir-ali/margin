@@ -15,8 +15,9 @@ import {
   Type,
   X,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { COMMANDS } from '../lib/commands';
+import { useFocusTrap } from '../lib/focusTrap';
 import { appInfo, type AppInfo } from '../lib/platform';
 import {
   ACCENTS,
@@ -159,6 +160,7 @@ const SECTIONS: { id: SettingsSection; label: string; icon: React.ReactNode; gro
           },
           { kind: 'switch', key: 'smoothScroll', label: 'Smooth scrolling', hint: 'Glide to headings and search results.' },
           { kind: 'switch', key: 'zoomImages', label: 'Click images to enlarge' },
+          { kind: 'switch', key: 'remoteImages', label: 'Load images from the internet', hint: "Off: notes can't contact websites when you open them" },
         ],
       },
       {
@@ -327,6 +329,9 @@ export function SettingsPanel() {
   const close = () => useUi.getState().close('settings');
   const [query, setQuery] = useState('');
   const q = query.trim().toLowerCase();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  useFocusTrap(dialogRef, searchRef);
 
   const searchResults = useMemo(() => {
     if (!q) return null;
@@ -354,8 +359,10 @@ export function SettingsPanel() {
       }}
     >
       <motion.div
+        ref={dialogRef}
         className="settings popover"
         role="dialog"
+        aria-modal="true"
         aria-label="Settings"
         initial={{ opacity: 0, y: 18, scale: 0.97 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -365,7 +372,7 @@ export function SettingsPanel() {
         <nav className="settings-nav">
           <div className="settings-search">
             <Search size={14} />
-            <input placeholder="Search settings" spellCheck={false} value={query} onChange={(e) => setQuery(e.target.value)} />
+            <input ref={searchRef} aria-label="Search settings" placeholder="Search settings" spellCheck={false} value={query} onChange={(e) => setQuery(e.target.value)} />
           </div>
           {SECTIONS.map((s) => {
             const on = !q && s.id === current.id;

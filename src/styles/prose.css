@@ -554,6 +554,19 @@
 .prose.reader img:active {
   scale: 0.99;
 }
+/* An internet image held back by the "Images from the internet" setting: its alt text, marked as not loaded. */
+.prose .remote-image {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 1px 8px;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-xs);
+  color: var(--text-3);
+  font-size: 0.9em;
+  line-height: 1.5;
+  vertical-align: baseline;
+}
 .prose :where(figure) {
   margin: 0 0 var(--doc-para-gap);
 }

@@ -2,6 +2,8 @@ mod drafts;
 mod files;
 #[cfg(windows)]
 mod snap_layout;
+#[cfg(windows)]
+mod spell_menu;
 mod store;
 mod watcher;
 #[cfg(windows)]
@@ -152,6 +154,7 @@ pub fn run() {
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
                 window_corner::let_close_receive_mouse(&window);
+                spell_menu::install(&window);
             }
             drafts::migrate_from_old_identifier(app.handle(), OLD_IDENTIFIER);
             let cwd = std::env::current_dir().unwrap_or_default();

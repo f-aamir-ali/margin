@@ -15,7 +15,8 @@ import {
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { requestClose, requestCloseTabs, runCommand } from '../lib/commands';
-import { openExternal, revealInExplorer } from '../lib/platform';
+import { isTauri, onContextMenuRoute, openExternal, revealInExplorer } from '../lib/platform';
+import { useSettings } from '../lib/settings';
 import { activeDoc, useApp } from '../lib/store';
 import { toast } from '../lib/toast';
 import { Menu, type MenuItem } from './ui/controls';
@@ -40,24 +41,55 @@ export function ContextMenu() {
   const [open, setOpen] = useState<Open | null>(null);
 
   useEffect(() => {
+    // In a text field the desktop side decides: a right-click on a misspelled word gets the
+    // native menu with spelling suggestions (WebView2 can't hand those to a page), anything else
+    // gets this menu. The menu is built now and shown when the answer arrives.
+    let pending: { open: Open | null; timer: ReturnType<typeof setTimeout> } | null = null;
+    const show = (open: Open | null) => {
+      if (pending) clearTimeout(pending.timer);
+      pending = null;
+      setOpen(open);
+    };
     const onContext = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      e.preventDefault();
       const items = build(target);
-      if (!items.length) return setOpen(null);
       const height = items.length * 32 + items.filter((i) => i.separatorBefore).length * 11 + 12;
-      setOpen({
-        x: Math.max(8, Math.min(e.clientX, window.innerWidth - 252)),
-        y: Math.max(8, Math.min(e.clientY, window.innerHeight - height - 8)),
-        items,
-      });
+      const open: Open | null = items.length
+        ? {
+            x: Math.max(8, Math.min(e.clientX, window.innerWidth - 252)),
+            y: Math.max(8, Math.min(e.clientY, window.innerHeight - height - 8)),
+            items,
+          }
+        : null;
+      const spelling = isTauri && !!target.closest('[contenteditable="true"], textarea, input') &&
+        useSettings.getState().settings.spellcheck;
+      if (!spelling) {
+        e.preventDefault();
+        return show(open);
+      }
+      setOpen(null);
+      if (pending) clearTimeout(pending.timer);
+      // If no answer comes (an older WebView2), show this menu anyway.
+      pending = { open, timer: setTimeout(() => show(pending?.open ?? null), 350) };
     };
-    const close = () => setOpen(null);
+    let offRoute: (() => void) | undefined;
+    let alive = true;
+    void onContextMenuRoute((native) => {
+      if (!pending) return;
+      if (native) {
+        clearTimeout(pending.timer);
+        pending = null;
+      } else show(pending.open);
+    }).then((off) => (alive ? (offRoute = off) : off()));
+    const close = () => show(null);
     window.addEventListener('contextmenu', onContext);
     window.addEventListener('blur', close);
     window.addEventListener('resize', close);
     window.addEventListener('wheel', close, { passive: true });
     return () => {
+      alive = false;
+      offRoute?.();
+      if (pending) clearTimeout(pending.timer);
       window.removeEventListener('contextmenu', onContext);
       window.removeEventListener('blur', close);
       window.removeEventListener('resize', close);

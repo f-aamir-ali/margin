@@ -364,6 +364,13 @@ export async function launchFiles(): Promise<string[]> {
   return q ? [q] : [];
 }
 
+/** For each right-click, whether the native spelling menu is showing (`true`) or the page should draw its own. */
+export async function onContextMenuRoute(cb: (native: boolean) => void): Promise<Unlisten> {
+  if (!isTauri) return () => undefined;
+  const { listen } = await import('@tauri-apps/api/event');
+  return listen<{ native: boolean }>('context-menu-route', (e) => cb(e.payload.native));
+}
+
 /** Files dropped on the window (desktop gives real paths). */
 export async function onFilesDropped(
   cb: (paths: string[]) => void,

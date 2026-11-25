@@ -30,6 +30,8 @@ export interface Settings {
   defaultMode: ViewMode | 'last';
   smoothScroll: boolean;
   zoomImages: boolean;
+  /** Off: notes can't contact websites when opened. Blocked images show as their alt text. */
+  remoteImages: boolean;
   // Editor
   spellcheck: boolean;
   smoothCaret: boolean;
@@ -96,6 +98,7 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultMode: 'read',
   smoothScroll: true,
   zoomImages: true,
+  remoteImages: true,
   spellcheck: false,
   smoothCaret: true,
   typewriter: false,

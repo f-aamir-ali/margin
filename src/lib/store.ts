@@ -378,6 +378,16 @@ function chain(id: string, op: () => Promise<void>): Promise<void> {
   return next;
 }
 
+/** From here on, every change to a tab reaches the drafts folder on its own. Safe to call twice. */
+let draftSyncing = false;
+export function startDraftSync() {
+  if (draftSyncing) return;
+  draftSyncing = true;
+  useApp.subscribe((s, prev) => {
+    if (s.docs !== prev.docs) syncDrafts(s.docs);
+  });
+}
+
 /** The status bar warns while any open tab's unsaved text isn't safely on disk. */
 function reportDraftTrouble() {
   const docs = useApp.getState().docs;
@@ -411,13 +421,19 @@ function writeDraftNow(id: string): Promise<void> {
   });
 }
 
+/** Above this size a draft is a big write, so it is taken less often while typing (still within seconds). */
+const BIG_DRAFT = 2 * 1024 * 1024;
+
 function scheduleDraft(id: string) {
   const now = Date.now();
   const p = pending.get(id);
   if (p) clearTimeout(p.timer);
   const since = p?.since ?? now;
-  // Debounced, but never held back longer than DRAFT_MAX_WAIT during continuous typing.
-  const wait = Math.max(0, Math.min(DRAFT_DEBOUNCE, since + DRAFT_MAX_WAIT - now));
+  const size = useApp.getState().docs.find((d) => d.id === id)?.content.length ?? 0;
+  const debounce = size > BIG_DRAFT ? 2000 : DRAFT_DEBOUNCE;
+  const maxWait = size > BIG_DRAFT ? 6000 : DRAFT_MAX_WAIT;
+  // Debounced, but never held back longer than the max wait during continuous typing.
+  const wait = Math.max(0, Math.min(debounce, since + maxWait - now));
   pending.set(id, { timer: setTimeout(() => void writeDraftNow(id), wait), since });
 }
 
@@ -860,9 +876,7 @@ export const useApp = create<AppStore>((set, get) => ({
         onDisk.delete(id);
       });
     }
-    useApp.subscribe((s, prev) => {
-      if (s.docs !== prev.docs) syncDrafts(s.docs);
-    });
+    startDraftSync();
     if (!session || session.version !== 2) void persistSession();
 
     for (const id of conflicts) {

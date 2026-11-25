@@ -117,6 +117,7 @@ export const COMMANDS: Command[] = [
   { id: 'file.newTab', title: 'New tab', group: 'File', keys: 'Ctrl+T', keywords: 'note', run: () => app().newDoc() },
   { id: 'file.newText', title: 'New plain text note', group: 'File', keys: 'Ctrl+Alt+N', keywords: 'txt notepad', run: () => app().newDoc('text') },
   { id: 'file.reopenClosed', title: 'Reopen closed tab', group: 'File', keys: 'Ctrl+Shift+T', keywords: 'undo close restore trash', run: () => app().reopenClosed() },
+  { id: 'file.clearClosed', title: 'Clear closed tab history', group: 'File', keywords: 'forget privacy reopen trash', run: () => app().clearClosed() },
   {
     id: 'file.openFolder',
     title: 'Open folder…',
@@ -335,11 +336,19 @@ function eventCombo(e: KeyboardEvent): string {
 const byCombo = new Map(COMMANDS.filter((c) => c.keys).map((c) => [c.keys as string, c]));
 
 /** Global shortcut handler. Returns true when the event was consumed. */
+/** Formatting keys the rich editor answers itself while you type in it (Ctrl+B is bold there, not the sidebar). */
+const EDITOR_OWNED = new Set(['Ctrl+B', 'Ctrl+I', 'Ctrl+U']);
+
 export function handleShortcut(e: KeyboardEvent): boolean {
-  if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return false;
+  if (['Control', 'Shift', 'Alt', 'Meta', 'AltGraph'].includes(e.key)) return false;
+  // Typing through an input method, or AltGr (which Windows reports as Ctrl+Alt): these
+  // produce characters, never commands.
+  if (e.isComposing || e.keyCode === 229 || e.getModifierState?.('AltGraph')) return false;
   const combo = eventCombo(e);
   const cmd = byCombo.get(combo);
   if (!cmd) return false;
+  const inRichEditor = e.target instanceof Element && !!e.target.closest('.ProseMirror');
+  if (inRichEditor && EDITOR_OWNED.has(combo)) return false;
   // Plain keys never steal typing; every binding here uses Ctrl or a function key.
   if (cmd.needsDoc && !doc()) return false;
   e.preventDefault();

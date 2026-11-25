@@ -678,6 +678,8 @@
   pointer-events: none;
   z-index: 3;
   opacity: 0;
+  /* Pivot on the foot of the caret: the italic lean (skewX, set by caret.ts) moves only the top. */
+  transform-origin: 50% 100%;
   will-change: transform;
   transition:
     transform 85ms var(--ease-out),

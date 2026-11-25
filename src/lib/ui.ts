@@ -65,3 +65,15 @@ export const useUi = create<UiStore>((set) => ({
   setConfirmClose: (confirmClose) => set({ confirmClose }),
   jumpTo: (target) => set({ jump: { ...target, nonce: ++nonce } }),
 }));
+
+/**
+ * True when the keyboard is working somewhere an editor must not pull focus from as it opens:
+ * a tab reached with the arrow keys, the find bar or a dialog. A tab clicked with the mouse
+ * doesn't count, so clicking a tab still lets you type straight away.
+ */
+export function focusIsElsewhere(): boolean {
+  const el = document.activeElement;
+  if (!(el instanceof HTMLElement)) return false;
+  if (el.closest('.findbar, [role="dialog"], [role="alertdialog"]')) return true;
+  return !!el.closest('[role="tab"]') && el.matches(':focus-visible');
+}

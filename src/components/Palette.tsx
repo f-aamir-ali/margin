@@ -2,12 +2,16 @@ import { motion } from 'motion/react';
 import { CornerDownLeft, FileText, Hash, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { COMMANDS } from '../lib/commands';
+import { useFocusTrap } from '../lib/focusTrap';
 import { extractHeadings } from '../lib/markdown';
-import { isTauri } from '../lib/platform';
+import { isTauri, listFiles, type DirEntry } from '../lib/platform';
 import { useSettings } from '../lib/settings';
-import { activeDoc, displayName, useApp } from '../lib/store';
+import { activeDoc, displayName, pathKey, useApp } from '../lib/store';
 import { useUi } from '../lib/ui';
 import { Keys, SPRING } from './ui/controls';
+
+/** Most file-name matches listed at once. */
+const FILE_RESULTS = 50;
 
 interface Row {
   key: string;
@@ -51,6 +55,13 @@ function fuzzy(query: string, text: string): { score: number; marks: number[] } 
   return { score: score - t.length * 0.01, marks };
 }
 
+/** `path` relative to `folder`, without a leading separator. Paths outside the folder come back unchanged. */
+function relativeTo(folder: string, path: string): string {
+  const base = folder.replace(/[\\/]+$/, '');
+  const inside = path.length > base.length && path.slice(0, base.length).toLowerCase() === base.toLowerCase();
+  return (inside ? path.slice(base.length) : path).replace(/^[\\/]+/, '');
+}
+
 function Marked({ text, marks }: { text: string; marks: number[] }) {
   if (!marks.length) return <>{text}</>;
   const set = new Set(marks);
@@ -66,13 +77,36 @@ export function Palette() {
   const [query, setQuery] = useState(() => useUi.getState().paletteQuery);
   const [cursor, setCursor] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useFocusTrap(dialogRef, inputRef);
   const doc = useApp(activeDoc);
   const recents = useApp((s) => s.recents);
   const docs = useApp((s) => s.docs);
+  const folder = useApp((s) => s.folder);
   const settings = useSettings((st) => st.settings);
   const content = doc?.content;
   const lineMode = query.startsWith(':');
   const headingMode = query.startsWith('#');
+
+  // The folder's file list is read once per palette opening (the palette mounts per opening) and again if the folder changes.
+  // A result that arrives after the folder changed or the palette closed is dropped.
+  const [folderFiles, setFolderFiles] = useState<{ folder: string; entries: DirEntry[] } | null>(null);
+  useEffect(() => {
+    if (!folder) return;
+    let current = true;
+    listFiles(folder, 5000)
+      .then((entries) => {
+        if (current) setFolderFiles({ folder, entries });
+      })
+      .catch(() => {
+        if (current) setFolderFiles({ folder, entries: [] });
+      });
+    return () => {
+      current = false;
+    };
+  }, [folder]);
+  const files = folder && folderFiles?.folder === folder ? folderFiles.entries : null;
 
   // Counting lines splits the whole document, so it runs once per document, not once per keystroke.
   const lineTotal = useMemo(
@@ -157,9 +191,35 @@ export function Palette() {
         out.push({ key: `recent-${r.path}`, title: r.name, group: 'Recent files', hint: r.path, icon: <FileText size={14} />, run: () => useApp.getState().openPaths([r.path]), score: m.score, marks: m.marks });
       }
     }
+    // File names in the open folder. Typing is needed: an empty query keeps the list to commands, tabs and recents.
+    if (q && folder && files) {
+      // Files already listed above (open tabs and recents) are not listed twice.
+      const listed = new Set<string>();
+      for (const d of docs) if (d.path) listed.add(pathKey(d.path));
+      for (const r of recents) listed.add(pathKey(r.path));
+      const matches: Row[] = [];
+      for (const f of files) {
+        if (f.isDir || listed.has(pathKey(f.path))) continue;
+        const m = fuzzy(q, f.name);
+        if (m) {
+          matches.push({
+            key: `file-${f.path}`,
+            title: f.name,
+            group: 'Files in folder',
+            hint: relativeTo(folder, f.path),
+            icon: <FileText size={14} />,
+            run: () => useApp.getState().openPaths([f.path]),
+            score: m.score,
+            marks: m.marks,
+          });
+        }
+      }
+      matches.sort((a, b) => b.score - a.score);
+      out.push(...matches.slice(0, FILE_RESULTS));
+    }
     if (q) out.sort((a, b) => b.score - a.score);
     return out.slice(0, 60);
-  }, [query, doc, recents, docs, lineMode, lineTotal, headingMode, headings]);
+  }, [query, doc, recents, docs, lineMode, lineTotal, headingMode, headings, folder, files]);
 
   useEffect(() => setCursor(0), [query]);
   useEffect(() => {
@@ -187,8 +247,10 @@ export function Palette() {
       }}
     >
       <motion.div
+        ref={dialogRef}
         className="palette popover"
         role="dialog"
+        aria-modal="true"
         aria-label="Command palette"
         initial={{ opacity: 0, y: -14, scale: 0.97 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -198,7 +260,8 @@ export function Palette() {
         <div className="palette-input">
           <Search size={16} />
           <input
-            autoFocus
+            ref={inputRef}
+            aria-label="Search commands and files"
             spellCheck={false}
             placeholder="Search commands and files, or type # for headings"
             value={query}

@@ -1,17 +1,19 @@
 import { syntaxHighlighting } from '@codemirror/language';
 import { Crepe } from '@milkdown/crepe';
 import { editorViewCtx, remarkStringifyOptionsCtx, serializerCtx } from '@milkdown/kit/core';
-import type { Node as ProseNode } from '@milkdown/kit/prose/model';
+import { Fragment, Slice, type Node as ProseNode } from '@milkdown/kit/prose/model';
 import { Plugin, PluginKey, Selection, TextSelection } from '@milkdown/kit/prose/state';
 import { trailingConfig } from '@milkdown/kit/plugin/trailing';
-import { Decoration, DecorationSet } from '@milkdown/kit/prose/view';
+import { closeHistory } from '@milkdown/kit/prose/history';
+import { Decoration, DecorationSet, type EditorView } from '@milkdown/kit/prose/view';
 import { $prose } from '@milkdown/kit/utils';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { attachSmoothCaret } from '../lib/caret';
+import { attachSmoothCaret, selectionCaretRect } from '../lib/caret';
 import { cmHighlight, cmTheme } from '../lib/cmTheme';
 import { configureMarkSerialisers, extraMarks } from '../lib/editorMarks';
 import { fromEditor, splitFrontMatter, toEditor } from '../lib/editorText';
-import { enhance } from '../lib/enhance';
+import { diagramsSettled, enhance } from '../lib/enhance';
+import { clipboardPlainText, plainTextLines } from '../lib/paste';
 import {
   assetUrl,
   asDataUrl,
@@ -24,9 +26,8 @@ import {
 import { activeTheme, isDarkTheme, useSettings } from '../lib/settings';
 import { liveEditors, useApp, type Doc } from '../lib/store';
 import { toast } from '../lib/toast';
+import { focusIsElsewhere } from '../lib/ui';
 import { useLongPage, useViewSync } from '../lib/viewSync';
-
-const SNAP_BLOCKS = 'h1, h2, h3, h4, h5, h6, blockquote, ul, ol, hr, .milkdown-code-block, .milkdown-table-block';
 
 /** Dims every block except the one holding the caret (the "focus paragraph" setting). */
 const activeBlockKey = new PluginKey('mdv-active-block');
@@ -63,6 +64,109 @@ const alertBlocks = $prose(
             return true;
           });
           return found.length ? DecorationSet.create(state.doc, found) : null;
+        },
+      },
+    }),
+);
+
+/** How close to the pane's edge the caret is put when a scroll brings it back into view. */
+const CARET_EDGE = 24;
+
+/**
+ * Scrolls only when the caret leaves the visible part of the pane, and then by the least that brings it back to
+ * CARET_EDGE from the edge. ProseMirror's default scrolls as soon as the caret's line touches an edge, so Enter
+ * or a wrapped line at the bottom of the screen jumped the whole page.
+ */
+const caretScroll = $prose(
+  () =>
+    new Plugin({
+      key: new PluginKey('mdv-caret-scroll'),
+      props: {
+        handleScrollToSelection(view) {
+          const scroller = view.dom.closest<HTMLElement>('.doc-scroller');
+          if (!scroller) return false;
+          const caret = selectionCaretRect() ?? view.coordsAtPos(view.state.selection.head, 1);
+          const box = scroller.getBoundingClientRect();
+          // Layout pixels versus screen pixels: the two differ under page zoom.
+          const scale = scroller.offsetWidth ? box.width / scroller.offsetWidth : 1;
+          const top = box.top + scroller.clientTop * scale;
+          const bottom = top + scroller.clientHeight * scale;
+          const edge = CARET_EDGE * scale;
+          let move = 0;
+          if (caret.bottom > bottom) move = caret.bottom - (bottom - edge);
+          else if (caret.top < top) move = caret.top - (top + edge);
+          if (move) scroller.scrollTop += move / scale;
+          return true;
+        },
+      },
+    }),
+);
+
+/**
+ * A line whose block type changes, such as a paragraph typed into a heading, quote or list ("# ", "> ", "- "),
+ * settles in with a short fade. Enter and typing keep the type, so they never trigger it and existing text stays put.
+ */
+const blockTypeSnap = $prose(
+  () =>
+    new Plugin({
+      key: new PluginKey('mdv-block-snap'),
+      view: () => ({
+        update(view, prev) {
+          if (view.state.doc.eq(prev.doc) || useSettings.getState().settings.motion !== 'full') return;
+          const now = view.state.selection.$from;
+          const was = prev.selection.$from;
+          if (now.depth < 1 || was.depth < 1 || now.index(0) !== was.index(0) || now.node(1).type === was.node(1).type) return;
+          const el = view.nodeDOM(now.before(1));
+          if (el instanceof HTMLElement) {
+            el.animate(
+              [
+                { opacity: 0.35, transform: 'translateY(4px)' },
+                { opacity: 1, transform: 'none' },
+              ],
+              { duration: 280, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' },
+            );
+          }
+        },
+      }),
+    }),
+);
+
+/**
+ * Pasted text arrives as plain text: no marks, links or headings from HTML, and no Markdown parsing, so `*x*` stays
+ * literal. Each line becomes a paragraph of unmarked text, in one transaction. Files such as images go to Crepe's
+ * uploader, and inside a code block the text goes in as it is.
+ */
+function pastePlain(view: EditorView, event: ClipboardEvent): boolean {
+  const data = event.clipboardData;
+  if (!data || data.files.length) return false;
+  const text = clipboardPlainText(data.getData('text/plain'), data.getData('text/html'));
+  if (!text) return false;
+  const { state } = view;
+  const { schema } = state;
+  // A paste starts its own undo step, so Ctrl+Z takes back the paste and nothing typed before it.
+  const tr = closeHistory(state.tr);
+  if (state.selection.$from.parent.type.spec.code) {
+    tr.replaceSelectionWith(schema.text(text.replace(/\r\n?/g, '\n')), false);
+  } else {
+    const paragraphs = plainTextLines(text).map((line) => schema.nodes.paragraph.create(null, schema.text(line)));
+    // Open at both ends: the first line joins the text at the caret and the last one the text after it.
+    if (paragraphs.length) tr.replaceSelection(new Slice(Fragment.from(paragraphs), 1, 1));
+  }
+  event.preventDefault();
+  // Whitespace-only text is consumed as "nothing to paste" rather than handed to the Markdown parser.
+  if (tr.docChanged) view.dispatch(tr.scrollIntoView().setMeta('paste', true).setMeta('uiEvent', 'paste'));
+  return true;
+}
+
+const plainPaste = $prose(
+  () =>
+    new Plugin({
+      key: new PluginKey('mdv-plain-paste'),
+      props: {
+        // handleDOMEvents rather than handlePaste: Milkdown's clipboard plugin answers handlePaste first, and it would
+        // parse the HTML and the plain text as Markdown. ProseMirror offers a paste to handleDOMEvents before that.
+        handleDOMEvents: {
+          paste: (view, event) => pastePlain(view, event as ClipboardEvent),
         },
       },
     }),
@@ -165,15 +269,12 @@ export function Editor({ doc, active, onPreparing, onReady, onError }: {
             holder.appendChild(block);
             document.body.appendChild(holder);
             const cleanup = enhance(holder, { theme: dark ? 'dark' : 'light' });
-            const started = Date.now();
-            const poll = () => {
-              const finished = block.classList.contains('is-rendered') || block.querySelector('.mermaid-error');
-              if (!finished && Date.now() - started < 8000) return void setTimeout(poll, 50);
+            // Settles once the diagram has rendered or failed, or once enhance() is cleaned up first.
+            void diagramsSettled(holder).then(() => {
               cleanup();
               holder.remove();
               if (!disposed) applyPreview(block);
-            };
-            poll();
+            });
             return undefined;
           },
         },
@@ -200,7 +301,7 @@ export function Editor({ doc, active, onPreparing, onReady, onError }: {
         shouldAppend: (last: ProseNode | null) => !!last && /code|table|math|image|hr|html|diagram/i.test(last.type.name),
       }));
     });
-    crepe.editor.use(activeBlock).use(alertBlocks).use(extraMarks);
+    crepe.editor.use(activeBlock).use(alertBlocks).use(extraMarks).use(caretScroll).use(blockTypeSnap).use(plainPaste);
 
     // Delay serialisation until there is an actual edit, including the untouched baseline.
     // Edits reach the store after a short pause in typing, and at least once a second while
@@ -261,7 +362,6 @@ export function Editor({ doc, active, onPreparing, onReady, onError }: {
     crepe.editor.use(trackEdits);
     liveEditors.add(flush);
 
-    let snapObserver: MutationObserver | undefined;
     void crepe.create().then(() => {
       if (disposed) return;
       baseline = crepe.editor.action((ctx) => ctx.get(editorViewCtx).state.doc);
@@ -270,26 +370,6 @@ export function Editor({ doc, active, onPreparing, onReady, onError }: {
       const pm = editorRoot.querySelector<HTMLElement>('.ProseMirror');
       if (pm) {
         pm.spellcheck = s.spellcheck;
-        // The snap: when a line turns into a heading, quote, list… the new block settles in.
-        // Web Animations leave the DOM untouched, so ProseMirror never notices.
-        snapObserver = new MutationObserver((muts) => {
-          if (useSettings.getState().settings.motion !== 'full') return;
-          for (const m of muts) {
-            // Only a 1-for-1 swap is a block changing type; pastes and reloads add many nodes at once.
-            if (m.addedNodes.length !== 1 || m.removedNodes.length !== 1) continue;
-            const el = m.addedNodes[0];
-            if (el instanceof HTMLElement && el.matches(SNAP_BLOCKS)) {
-              el.animate(
-                [
-                  { opacity: 0.3, transform: 'translateY(4px) scale(0.985)' },
-                  { opacity: 1, transform: 'none' },
-                ],
-                { duration: 280, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' },
-              );
-            }
-          }
-        });
-        snapObserver.observe(pm, { childList: true });
       }
       if (import.meta.env.DEV) {
         (window as unknown as Record<string, unknown>).__mdvEditor = () => frontMatter + fromEditor(crepe.getMarkdown());
@@ -308,7 +388,6 @@ export function Editor({ doc, active, onPreparing, onReady, onError }: {
       liveEditors.delete(flush);
       disposed = true;
       if (crepeRef.current === crepe) crepeRef.current = null;
-      snapObserver?.disconnect();
       void crepe.destroy();
       editorRoot.remove();
     };
@@ -361,8 +440,7 @@ export function Editor({ doc, active, onPreparing, onReady, onError }: {
   // Entering Editing mode means you want to type: place the caret, without scrolling the page.
   useLayoutEffect(() => {
     if (!active || !ready || doc.readonly) return;
-    const focused = document.activeElement;
-    if (focused?.closest('.findbar, [role="dialog"], [role="alertdialog"]')) return;
+    if (focusIsElsewhere()) return;
     const scroller = scrollerRef.current;
     const top = scroller?.scrollTop ?? 0;
     crepeRef.current?.editor.action((ctx) => ctx.get(editorViewCtx).focus());
