@@ -55,11 +55,22 @@ async function coldStart(args, selector) {
   return { b, page, visible };
 }
 
+/** Settles the page heap first, so temporary copies made while loading don't count. */
+async function settledMemoryMb(page) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("HeapProfiler.collectGarbage").catch(() => undefined);
+  await sleep(1000);
+  const heap = await cdp.send("Runtime.getHeapUsage").catch(() => null);
+  lastHeapMb = heap ? Math.round(heap.usedSize / 1048576) : NaN;
+  return memoryMb();
+}
+let lastHeapMb = NaN;
+
 /** Process-tree private memory (MB) of the running test copy, WebView2 helpers included. */
 function memoryMb() {
   const ps = `
 $all = Get-CimInstance Win32_Process
-$root = $all | Where-Object { $_.Name -eq 'margin.exe' } | Select-Object -First 1
+$root = $all | Where-Object { $_.Name -eq 'margin.exe' } | Sort-Object CreationDate -Descending | Select-Object -First 1
 if (-not $root) { 0; exit }
 $ids = @($root.ProcessId); $changed = $true
 while ($changed) { $changed = $false; foreach ($p in $all) { if ($ids -contains $p.ParentProcessId -and -not ($ids -contains $p.ProcessId)) { $ids += $p.ProcessId; $changed = $true } } }
@@ -116,7 +127,7 @@ try {
   // One session for the interactive measurements.
   const { b, page } = await coldStart([long, second], '.prose');
   await sleep(1500);
-  const idleMb = memoryMb();
+  const idleMb = await settledMemoryMb(page);
 
   // Tab switching (Ctrl+Tab) until the other document is on screen.
   const switches = [];
@@ -146,15 +157,19 @@ try {
   // Typing in the 20 MB log (Source), in a fresh session.
   await b.close();
   kill();
+  await sleep(1500); // let the previous WebView2 processes exit before measuring the next session
   const big = await coldStart([log], '.cm-content');
   await big.page.click('.cm-content');
   await big.page.keyboard.press('Control+End');
   add('Typing in a 20 MB log (keystroke → frame)', await typingLatency(big.page, 40));
-  const bigMb = memoryMb();
+  await sleep(6000); // steady state: a few seconds after typing stops
+  const bigMb = await settledMemoryMb(big.page);
+  const bigHeap = lastHeapMb;
   await big.b.close();
 
   rows.push({ name: 'Memory, two notes open (process tree, private)', median: idleMb, p95: idleMb, unit: 'MB', n: 1 });
-  rows.push({ name: 'Memory, 20 MB log open', median: bigMb, p95: bigMb, unit: 'MB', n: 1 });
+  rows.push({ name: 'Memory, 20 MB log open and edited', median: bigMb, p95: bigMb, unit: 'MB', n: 1 });
+  rows.push({ name: '  of which JavaScript heap', median: bigHeap, p95: bigHeap, unit: 'MB', n: 1 });
 
   if (process.argv.includes('--json')) console.log(JSON.stringify(rows, null, 2));
   else {

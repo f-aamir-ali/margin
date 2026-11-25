@@ -37,7 +37,9 @@
   min-height: 40vh;
   line-height: var(--doc-leading);
   outline: none;
-  white-space: pre-wrap;
+  /* ProseMirror's own default. With pre-wrap and a custom caret colour together, WebView2 never
+     draws spelling underlines in the editor (measured 2026-11-25). */
+  white-space: break-spaces;
   caret-color: var(--accent);
 }
 .prose.editor .milkdown .ProseMirror:focus-visible,

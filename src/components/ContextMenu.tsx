@@ -51,7 +51,12 @@ export function ContextMenu() {
       setOpen(open);
     };
     const onContext = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
+      // A menu that is still fading out can sit under the pointer: look through it to what was clicked.
+      let target = e.target as HTMLElement;
+      if (target.closest('[role="menu"]')) {
+        const under = document.elementsFromPoint(e.clientX, e.clientY).find((el) => !el.closest('[role="menu"]'));
+        if (under instanceof HTMLElement) target = under;
+      }
       const items = build(target);
       const height = items.length * 32 + items.filter((i) => i.separatorBefore).length * 11 + 12;
       const open: Open | null = items.length

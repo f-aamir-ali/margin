@@ -19,6 +19,15 @@ import {
 } from '../lib/find';
 import { IconButton, SPRING } from './ui/controls';
 
+/**
+ * CodeMirror's text with every line break as one character, so match offsets are CodeMirror
+ * positions. `sliceDoc()` would use the file's own line separator, and CRLF would shift every
+ * match by one character per line.
+ */
+function cmText(view: { state: { doc: { length: number; sliceString(from: number, to?: number, sep?: string): string } } }): string {
+  return view.state.doc.sliceString(0, view.state.doc.length, '\n');
+}
+
 /** Past these the count reads "N+" and the list stops there. */
 const CAP_SOURCE = 20000;
 const CAP_RENDERED = 3000;
@@ -309,7 +318,7 @@ export function FindBar({ doc }: { doc: Doc }) {
       const el = isSource ? null : root();
       if (el && (!dom.current || dom.current.el !== el)) dom.current = indexDom(el);
       const idx = el ? dom.current : null;
-      const text = isSource ? (view?.state.sliceDoc() ?? '') : (idx?.text ?? '');
+      const text = isSource ? (view ? cmText(view) : '') : (idx?.text ?? '');
 
       const snapshot = view?.state.doc;
       let res: FindResult | null = { ranges: [], capped: false, error: null };
@@ -458,7 +467,7 @@ export function FindBar({ doc }: { doc: Doc }) {
     const view = sourceApi.view;
     const m = sourceMatches.current[indexRef.current];
     if (!m || !view || doc.readonly) return;
-    const edit = replaceAt(view.state.sliceDoc(), m.from, query, replacement, opts);
+    const edit = replaceAt(cmText(view), m.from, query, replacement, opts);
     if (!edit || edit.to !== m.to) {
       // The text changed since the last search. Search again rather than guess.
       void run();
@@ -472,7 +481,7 @@ export function FindBar({ doc }: { doc: Doc }) {
   const replaceAllMatches = () => {
     const view = sourceApi.view;
     if (!query || !view || doc.readonly || compiled.error) return;
-    const { changes, count: n } = replaceChanges(view.state.sliceDoc(), query, replacement, opts);
+    const { changes, count: n } = replaceChanges(cmText(view), query, replacement, opts);
     if (!n) return;
     view.dispatch({ changes: changes.map((c) => ({ from: c.from, to: c.to, insert: toLines(c.insert) })) });
     toast.success(`Replaced ${fmt(n)} ${n === 1 ? 'match' : 'matches'}`);

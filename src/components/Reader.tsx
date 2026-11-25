@@ -171,6 +171,9 @@ export function blockRemoteImages(root: ParentNode): number {
   return replaced;
 }
 
+/** Rendered pages of recently shown notes, newest last, so switching tabs doesn't re-parse them. */
+const renderCache = new Map<string, { key: string; value: Rendered }>();
+
 export function Reader({ doc }: { doc: Doc }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLElement>(null);
@@ -185,6 +188,10 @@ export function Reader({ doc }: { doc: Doc }) {
   const blocking = !s.remoteImages && !remoteAllowed.has(doc.id);
 
   const rendered = useMemo<Rendered>(() => {
+    // Switching back to a tab reuses its page instead of parsing the whole note again.
+    const key = [docDir, s.breaks, s.linkify, s.typographer, s.emoji, s.math, s.rawHtml, s.codeLineNumbers, isTauri].join("|");
+    const hit = renderCache.get(doc.id);
+    if (hit && hit.key === key && hit.value.source === doc.content) return hit.value;
     const started = performance.now();
     const out = renderMarkdown(doc.content, {
       breaks: s.breaks,
@@ -200,8 +207,13 @@ export function Reader({ doc }: { doc: Doc }) {
         return local ? assetUrl(local) : url;
       },
     });
-    return { ...out, ms: performance.now() - started, source: doc.content };
-  }, [doc.content, docDir, s.breaks, s.linkify, s.typographer, s.emoji, s.math, s.rawHtml, s.codeLineNumbers]);
+    const value = { ...out, ms: performance.now() - started, source: doc.content };
+    renderCache.delete(doc.id);
+    renderCache.set(doc.id, { key, value });
+    // A handful of recent tabs is enough; the oldest is dropped first.
+    if (renderCache.size > 6) renderCache.delete(renderCache.keys().next().value as string);
+    return value;
+  }, [doc.id, doc.content, docDir, s.breaks, s.linkify, s.typographer, s.emoji, s.math, s.rawHtml, s.codeLineNumbers]);
 
   const remoteInHtml = useMemo(() => REMOTE_IN_HTML.test(rendered.html), [rendered.html]);
 

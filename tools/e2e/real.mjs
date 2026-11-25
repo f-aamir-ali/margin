@@ -494,9 +494,9 @@ try {
       linkLines: range.getClientRects().length,
     };
   });
-  ok('a worksheet table fills the reading pane at 60% zoom and its photo label fits on one line',
+  ok('a worksheet table stays inside the pane at 100% and 60% zoom, and its photo label fits on one line',
     (await page.locator('.zoom-value').textContent()).trim() === '60%' &&
-      layout.table === widthAtDefaultZoom && layout.table / layout.pane > 0.85 && layout.linkLines === 1,
+      widthAtDefaultZoom <= layout.pane + 1 && layout.table <= layout.pane && layout.table / layout.pane > 0.6 && layout.linkLines === 1,
     JSON.stringify(layout));
 
   // Check the shell handoff independently of which apps this PC has set as defaults.

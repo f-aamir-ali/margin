@@ -74,7 +74,8 @@ pub fn install(window: &WebviewWindow) {
 unsafe fn route(args: &ICoreWebView2ContextMenuRequestedEventArgs) -> windows::core::Result<bool> {
     let items = unsafe { args.MenuItems()? };
     let names = unsafe { item_names(&items)? };
-    if !names.iter().any(|name| name == "spellCheck") {
+    // The runtime calls them "spellcheck"; the documentation says "spellCheck".
+    if !names.iter().any(|name| name.eq_ignore_ascii_case("spellcheck")) {
         return Ok(false);
     }
     // Remove from the end so indices stay valid.

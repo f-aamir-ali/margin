@@ -18,6 +18,8 @@ export interface StatsRunner {
   submit(content: string, plain: boolean): void;
   /** Stop the worker and forget unfinished work. The runner still works afterwards. */
   dispose(): void;
+  /** Stop an idle worker so its memory (copies of a huge text) goes back to Windows. The next request starts a new one. */
+  release(): void;
 }
 
 /**
@@ -93,6 +95,11 @@ export function createStatsRunner(makeWorker: StatsWorkerFactory, onResult: (sta
       inFlight = null;
       waiting = null;
     },
+    release() {
+      if (inFlight !== null || waiting) return;
+      worker?.terminate();
+      worker = null;
+    },
   };
 }
 
@@ -114,8 +121,17 @@ export function useDocStats(content: string, plain: boolean): DocStats {
   const [remote, setRemote] = useState<DocStats | null>(null);
   const [runner] = useState(() => createStatsRunner(workerFactory, setRemote));
 
+  // Long texts are counted once typing pauses, not on every keystroke: each request copies the
+  // whole text into the worker. An idle worker is stopped so those copies don't linger.
   useEffect(() => {
-    if (threaded) runner.submit(text, plain);
+    if (!threaded) return;
+    const submit = setTimeout(() => runner.submit(text, plain), remote ? 300 : 0);
+    const release = setTimeout(() => runner.release(), 5000);
+    return () => {
+      clearTimeout(submit);
+      clearTimeout(release);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runner, threaded, text, plain]);
   useEffect(() => () => runner.dispose(), [runner]);
 
