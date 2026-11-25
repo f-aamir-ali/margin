@@ -17,11 +17,15 @@ import {
   watchFile,
   writeFile,
   downloadText,
+  errorKind,
+  errorMessage,
+  joinPath,
+  writeBinary,
   type Draft,
   type Eol,
   type FileData,
 } from './platform';
-import { dashLinesAsSeparators } from './editorText';
+import { dashLinesAsSeparators, extractDataImages } from './editorText';
 import { useSettings, type ViewMode } from './settings';
 import { toast } from './toast';
 
@@ -55,6 +59,14 @@ export interface Doc {
   /** The file changed on disk while we hold unsaved edits. */
   conflict: boolean;
   missing: boolean;
+  /** Disk version (size and modification time) that `saved` came from; a save is refused if the file moved on. */
+  version: string | null;
+  /** The file exists but couldn't be read when the tab was restored (locked, no access, too large). */
+  diskError: string | null;
+  /** Decoding replaced malformed bytes: the first save asks before writing the changed bytes. */
+  lossy: boolean;
+  /** A temporary view (the disk version shown for comparison): never drafted, restored or kept as closed. */
+  transient?: boolean;
 }
 
 export interface RecentFile {
@@ -120,6 +132,8 @@ interface AppStore {
   zoom: number;
   lastMode: ViewMode;
   ready: boolean;
+  /** Set while unsaved text couldn't be written to the drafts folder (disk full, no access). */
+  draftTrouble: string | null;
 
   init: () => Promise<void>;
   openPaths: (paths: string[], opts?: { activate?: boolean; force?: boolean }) => Promise<void>;
@@ -141,11 +155,17 @@ interface AppStore {
   setEncoding: (id: string, encoding: string, bom: boolean) => void;
   reopenWithEncoding: (id: string, encoding: string) => Promise<void>;
   setScroll: (id: string, scroll: number) => void;
-  save: (id?: string) => Promise<boolean>;
+  /** `force` overwrites a file that changed on disk (the user chose "Keep mine"). */
+  save: (id?: string, opts?: { force?: boolean }) => Promise<boolean>;
   saveAs: (id?: string) => Promise<boolean>;
   saveAll: () => Promise<void>;
   reload: (id: string, silent?: boolean) => Promise<void>;
+  /** Settle a tab whose file changed on disk. Every choice keeps the other text recoverable. */
+  resolveConflict: (id: string, how: 'compare' | 'overwrite' | 'disk' | 'copy') => Promise<void>;
+  /** Try reading a file that couldn't be read at startup again. */
+  retryDisk: (id: string) => Promise<void>;
   handleExternalChange: (path: string, kind: string) => Promise<void>;
+  clearClosed: () => void;
   removeRecent: (path: string) => void;
   clearRecents: () => void;
   setSidebar: (patch: Partial<Pick<AppStore, 'sidebarOpen' | 'sidebarTab' | 'sidebarWidth' | 'folder'>>) => void;
@@ -155,7 +175,17 @@ interface AppStore {
 
 const newId = () => `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 
-const samePath = (a: string, b: string) => a.replace(/\//g, '\\').toLowerCase() === b.replace(/\//g, '\\').toLowerCase();
+/** Windows paths: case, separator style, doubled or trailing separators and `.` segments don't matter. */
+export function pathKey(p: string): string {
+  return p
+    .replace(/\//g, '\\')
+    .replace(/^\\\\\?\\(UNC\\)?/i, (_m, unc?: string) => (unc ? '\\\\' : ''))
+    .replace(/(?!^)\\{2,}/g, '\\')
+    .replace(/\\\.(?=\\|$)/g, '')
+    .replace(/\\+$/, '')
+    .toLowerCase();
+}
+export const samePath = (a: string, b: string) => pathKey(a) === pathKey(b);
 
 /** Above this size a file opens as plain text: the markdown views would be slow. */
 const BIG_FILE = 5 * 1024 * 1024;
@@ -243,7 +273,7 @@ function sessionSnapshot(): Session {
   const s = useApp.getState();
   return {
     version: 2,
-    tabs: s.docs.map((d) => ({
+    tabs: s.docs.filter((d) => !d.transient).map((d) => ({
       id: d.id,
       path: d.path,
       name: d.name,
@@ -254,7 +284,7 @@ function sessionSnapshot(): Session {
       eol: d.eol,
       binary: d.binary || undefined,
     })),
-    activeId: s.activeId,
+    activeId: s.docs.find((d) => d.id === s.activeId)?.transient ? s.docs.find((d) => !d.transient)?.id ?? null : s.activeId,
     sidebarOpen: s.sidebarOpen,
     sidebarTab: s.sidebarTab,
     sidebarWidth: s.sidebarWidth,
@@ -300,7 +330,17 @@ const DRAFT_DEBOUNCE = 700;
 const DRAFT_MAX_WAIT = 2000;
 
 /** Untitled notes always keep a draft; file tabs only while they hold unsaved edits. */
-const needsDraft = (d: Doc) => !d.path || isDirty(d);
+const needsDraft = (d: Doc) => !d.transient && (!d.path || isDirty(d));
+
+/** The baseline only changes on open, save or reload, so its hash is worked out once per version. */
+const savedHashes = new Map<string, { saved: string; hash: string }>();
+function savedHash(d: Doc): string {
+  const cached = savedHashes.get(d.id);
+  if (cached?.saved === d.saved) return cached.hash;
+  const hash = hashText(d.saved);
+  savedHashes.set(d.id, { saved: d.saved, hash });
+  return hash;
+}
 
 function toDraft(d: Doc): Draft {
   return {
@@ -308,7 +348,7 @@ function toDraft(d: Doc): Draft {
     path: d.path,
     name: d.name,
     content: d.content,
-    ...(d.path ? { savedHash: hashText(d.saved) } : { saved: d.saved }),
+    ...(d.path ? { savedHash: savedHash(d) } : { saved: d.saved }),
     mode: d.mode,
     kind: d.kind,
     encoding: d.encoding,
@@ -324,10 +364,11 @@ function chain(id: string, op: () => Promise<void>): Promise<void> {
   const next = (chains.get(id) ?? Promise.resolve()).then(async () => {
     try {
       await op();
-      failedDrafts.delete(id);
+      if (failedDrafts.delete(id)) reportDraftTrouble();
     } catch (err) {
       failedDrafts.set(id, err);
       console.warn('Could not save a draft', err);
+      reportDraftTrouble();
     }
   });
   chains.set(id, next);
@@ -336,6 +377,22 @@ function chain(id: string, op: () => Promise<void>): Promise<void> {
   });
   return next;
 }
+
+/** The status bar warns while any open tab's unsaved text isn't safely on disk. */
+function reportDraftTrouble() {
+  const docs = useApp.getState().docs;
+  const failed = docs.find((d) => failedDrafts.has(d.id));
+  const trouble = failed ? errorMessage(failedDrafts.get(failed.id)) || 'The drafts folder could not be written.' : null;
+  if (useApp.getState().draftTrouble !== trouble) useApp.setState({ draftTrouble: trouble });
+  // Keep retrying in the background: the disk may have been full for a moment.
+  if (failed && !retryTimer) {
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined;
+      for (const d of useApp.getState().docs) if (failedDrafts.has(d.id)) void writeDraftNow(d.id);
+    }, 5000);
+  }
+}
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
 function writeDraftNow(id: string): Promise<void> {
   const p = pending.get(id);
@@ -376,13 +433,37 @@ function syncDrafts(docs: Doc[]) {
     if (prev && (Object.keys(next) as (keyof Seen)[]).every((k) => prev[k] === next[k])) continue;
     seen.set(d.id, next);
     scheduleDraft(d.id);
+    if (prev && (prev.content !== next.content || prev.encoding !== next.encoding || prev.bom !== next.bom)) scheduleAutosave(d.id);
   }
+}
+
+/* ---------- autosave: per document, so a tab in the background still gets written ---------- */
+
+const autosaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Autosave only writes a file Margin can safely overwrite; anything doubtful waits for an explicit Ctrl+S. */
+export const canAutosave = (d: Doc) =>
+  !!d.path && !d.readonly && !d.conflict && !d.missing && !d.diskError && !d.lossy && !d.binary && !d.transient && isDirty(d);
+
+function scheduleAutosave(id: string) {
+  clearTimeout(autosaveTimers.get(id));
+  autosaveTimers.delete(id);
+  const s = useSettings.getState().settings;
+  if (s.autoSave !== 'delay') return;
+  autosaveTimers.set(id, setTimeout(() => {
+    autosaveTimers.delete(id);
+    const d = useApp.getState().docs.find((x) => x.id === id);
+    if (d && canAutosave(d)) void useApp.getState().save(id);
+  }, s.autoSaveDelay * 1000));
 }
 
 function dropDraft(id: string) {
   const p = pending.get(id);
   if (p) clearTimeout(p.timer);
   pending.delete(id);
+  clearTimeout(autosaveTimers.get(id));
+  autosaveTimers.delete(id);
+  savedHashes.delete(id);
   seen.delete(id);
   void chain(id, async () => {
     await draftDelete(id);
@@ -430,9 +511,31 @@ function pushRecent(recents: RecentFile[], path: string): RecentFile[] {
 
 const CLOSED_KEEP = 20;
 const CLOSED_DAYS = 30;
+/** Closed-tab history is loaded at every start, so its text is capped (the newest entry always stays). */
+const CLOSED_BYTES = 8 * 1024 * 1024;
 
-function persistClosed(closed: ClosedTab[]) {
-  void storeSet('closed', closed);
+/** Trims closed-tab history to the newest entries that fit the count and size budgets. */
+export function trimClosed(closed: ClosedTab[]): ClosedTab[] {
+  const kept: ClosedTab[] = [];
+  let bytes = 0;
+  for (let i = closed.length - 1; i >= 0 && kept.length < CLOSED_KEEP; i--) {
+    bytes += (closed[i].content?.length ?? 0) * 2;
+    if (kept.length && bytes > CLOSED_BYTES) break;
+    kept.unshift(closed[i]);
+  }
+  return kept;
+}
+
+/**
+ * Writes the closed-tab history. Writes run one after another and each writes the latest list,
+ * so a slow earlier write can never land after (and undo) a later one. Rejects when the write
+ * fails, so a caller can keep a draft until its text is safely recorded.
+ */
+let closedWrite: Promise<void> = Promise.resolve();
+function persistClosed(): Promise<void> {
+  const task = closedWrite.then(() => storeSet('closed', useApp.getState().closed, true));
+  closedWrite = task.catch(() => undefined);
+  return task;
 }
 
 /* ---------- reading files ---------- */
@@ -458,23 +561,44 @@ async function readForOpen(path: string, force = false, encoding?: string): Prom
 }
 
 function docFromFile(f: FileData, mode: ViewMode, scroll: number, id = newId(), kind?: DocKind): Doc {
+  // A file that grew past the limit opens as text even if it was markdown last time.
+  const k = f.size > BIG_FILE ? 'text' : kind ?? kindFor(f.path, f.size);
   return {
-    ...makeDoc(f.path, f.name, f.content, f.mtimeMs, mode, f.readonly, scroll, kind ?? kindFor(f.path, f.size), id),
+    ...makeDoc(f.path, f.name, f.content, f.mtimeMs, mode, f.readonly, scroll, k, id),
     encoding: f.encoding,
     bom: f.bom,
     diskEncoding: f.encoding,
     diskBom: f.bom,
     binary: f.binary,
+    version: f.version,
+    lossy: f.lossy,
   };
 }
 
 function refreshedFile(d: Doc, f: FileData): Doc {
+  const big = f.size > BIG_FILE && d.kind !== 'text';
   return {
     ...d, content: f.content, saved: f.content, mtimeMs: f.mtimeMs,
     encoding: f.encoding, bom: f.bom, diskEncoding: f.encoding, diskBom: f.bom,
     eol: detectEol(f.content, d.eol), readonly: f.readonly, binary: f.binary,
-    rev: d.rev + 1, conflict: false, missing: false,
+    rev: d.rev + 1, conflict: false, missing: false, version: f.version, diskError: null, lossy: f.lossy,
+    ...(big ? { kind: 'text' as const } : {}),
   };
+}
+
+/** Says so when what is shown isn't byte for byte what is on disk. */
+function noteFileQuirks(f: FileData) {
+  if (f.lossy) {
+    toast.warn(
+      `${f.name} has bytes that aren't valid ${f.encoding}`,
+      'They show as � and saving would replace them. Try another encoding from the status bar.',
+    );
+  } else if (f.mixedEol) {
+    toast.info(
+      `${f.name} mixed different line endings`,
+      `They show as ${detectEol(f.content) === '\r\n' ? 'Windows (CRLF)' : detectEol(f.content) === '\n' ? 'Unix (LF)' : 'Mac (CR)'}. Saving writes every line that way.`,
+    );
+  }
 }
 
 function sameEdit(before: Doc, current: Doc): boolean {
@@ -483,14 +607,75 @@ function sameEdit(before: Doc, current: Doc): boolean {
 }
 
 const saving = new Set<string>();
+/** Tabs whose file changed on disk while they were being saved: checked again after the save. */
+const recheck = new Set<string>();
 
-function savedFile(current: Doc, snapshot: Doc, text: string, mtimeMs: number, { encoding, bom }: { encoding: string; bom: boolean }): Doc {
+/** The one prompt for a file that changed on disk under unsaved edits. The status bar holds every choice. */
+function conflictToast(id: string, title: string, body: string) {
+  toast.action({
+    kind: 'warn',
+    title,
+    body: `${body} The status bar has Keep mine and Use the file's.`,
+    actionLabel: 'Compare',
+    onAction: () => void useApp.getState().resolveConflict(id, 'compare'),
+    sticky: true,
+  });
+}
+
+function savedFile(current: Doc, snapshot: Doc, text: string, { mtimeMs, version }: { mtimeMs: number; version: string }, { encoding, bom }: { encoding: string; bom: boolean }): Doc {
   return {
-    ...current, saved: text, mtimeMs, conflict: false, missing: false,
+    ...current, saved: text, mtimeMs, version, conflict: false, missing: false, diskError: null, lossy: false,
     content: current.content === snapshot.content && current.eol === snapshot.eol ? text : current.content,
     encoding: current.encoding === snapshot.encoding ? encoding : current.encoding,
     bom: current.bom === snapshot.bom ? bom : current.bom,
     diskEncoding: encoding, diskBom: bom,
+  };
+}
+
+const VIEW_MODES: ViewMode[] = ['read', 'edit', 'source'];
+const asMode = (m: unknown, fallback: ViewMode): ViewMode => (VIEW_MODES.includes(m as ViewMode) ? (m as ViewMode) : fallback);
+const asKind = (k: unknown, fallback: DocKind): DocKind => (k === 'markdown' || k === 'text' ? k : fallback);
+const asEol = (e: unknown): Eol | undefined => (e === '\r\n' || e === '\n' || e === '\r' ? e : undefined);
+const asText = (t: unknown, fallback = ''): string => (typeof t === 'string' ? t : fallback);
+
+/** A draft as the desktop side found it, with every field checked: one odd record must never stop Margin starting. */
+export function cleanDraft(raw: unknown): Draft | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const d = raw as Record<string, unknown>;
+  if (typeof d.id !== 'string' || !d.id || typeof d.content !== 'string') return null;
+  const path = typeof d.path === 'string' && d.path ? d.path : null;
+  return {
+    id: d.id,
+    path,
+    name: asText(d.name, path ? baseName(path) : 'Untitled'),
+    content: d.content,
+    saved: typeof d.saved === 'string' ? d.saved : undefined,
+    savedHash: typeof d.savedHash === 'string' ? d.savedHash : undefined,
+    mode: asMode(d.mode, 'edit'),
+    kind: asKind(d.kind, path && !isMarkdownPath(path) ? 'text' : 'markdown'),
+    encoding: asText(d.encoding, 'UTF-8') || 'UTF-8',
+    bom: d.bom === true,
+    diskEncoding: typeof d.diskEncoding === 'string' ? d.diskEncoding : undefined,
+    eol: asEol(d.eol),
+    updatedAt: typeof d.updatedAt === 'number' ? d.updatedAt : 0,
+  };
+}
+
+function cleanTab(raw: unknown): SessionTab | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const t = raw as Record<string, unknown>;
+  if (typeof t.id !== 'string' || !t.id) return null;
+  const path = typeof t.path === 'string' && t.path ? t.path : null;
+  return {
+    id: t.id,
+    path,
+    name: asText(t.name, path ? baseName(path) : 'Untitled'),
+    mode: asMode(t.mode, 'read'),
+    kind: asKind(t.kind, path ? kindFor(path) : 'markdown'),
+    scroll: typeof t.scroll === 'number' && Number.isFinite(t.scroll) ? t.scroll : 0,
+    encoding: asText(t.encoding, 'UTF-8') || 'UTF-8',
+    eol: asEol(t.eol),
+    binary: t.binary === true,
   };
 }
 
@@ -511,14 +696,47 @@ async function restoreTab(tab: SessionTab, draft: Draft | undefined, conflicts: 
       }
       doc.eol = detectEol(doc.content, draft?.eol ?? tab.eol);
       return doc;
-    } catch {
-      if (!draft) return null; // the file is gone and nothing unsaved: drop it quietly
-      const doc = makeDoc(tab.path, tab.name, draft.content, 0, tab.mode, false, tab.scroll, tab.kind, tab.id);
-      return { ...doc, saved: '', missing: true, encoding: draft.encoding, bom: draft.bom, eol: detectEol(doc.content, draft.eol ?? tab.eol) };
+    } catch (err) {
+      const gone = errorKind(err) === 'notfound';
+      // The file is gone and nothing was unsaved: drop the tab quietly.
+      if (gone && !draft) return null;
+      const doc = makeDoc(tab.path, tab.name, draft?.content ?? '', 0, tab.mode, false, tab.scroll, tab.kind, tab.id);
+      const restored: Doc = {
+        ...doc,
+        saved: draft ? '' : doc.content,
+        encoding: draft?.encoding ?? tab.encoding,
+        bom: draft?.bom ?? false,
+        diskEncoding: draft?.diskEncoding ?? tab.encoding,
+        eol: detectEol(doc.content, draft?.eol ?? tab.eol),
+      };
+      // A file that is there but can't be read (locked, no access, grown too large) is never
+      // treated as deleted: autosave stays off, and saving first checks what is on disk.
+      if (gone) return { ...restored, missing: true };
+      return { ...restored, diskError: errorMessage(err), readonly: !draft };
     }
   }
   const doc = makeDoc(null, draft?.name ?? tab.name, draft?.content ?? '', 0, tab.mode, false, tab.scroll, tab.kind, tab.id);
   return { ...doc, saved: draft?.saved ?? '', encoding: draft?.encoding ?? 'UTF-8', bom: draft?.bom ?? false, eol: detectEol(doc.content, draft?.eol ?? tab.eol) };
+}
+
+/** Runs `fn` over `items` with at most `limit` running at once, keeping the results in order. */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+/** A copy of a tab's unsaved text with no file behind it: used when that file is already open in another tab. */
+function recoveredCopy(name: string, content: string, kind: DocKind, mode: ViewMode, id = newId()): Doc {
+  const title = `${name.replace(/\.[^.]+$/, '')} (recovered)`;
+  return { ...makeDoc(null, title, content, 0, mode, false, 0, kind, id), saved: '' };
 }
 
 export const useApp = create<AppStore>((set, get) => ({
@@ -534,71 +752,94 @@ export const useApp = create<AppStore>((set, get) => ({
   zoom: 1,
   lastMode: 'read',
   ready: false,
+  draftTrouble: null,
 
   async init() {
-    const [recents, session, zoom, kinds, closed, list] = await Promise.all([
+    const [recents, rawSession, zoom, kinds, closed, list] = await Promise.all([
       storeGet<RecentFile[]>('recents'),
       storeGet<Session>('session'),
       storeGet<number>('zoom'),
       storeGet<Record<string, DocKind>>('file-kinds'),
       storeGet<ClosedTab[]>('closed'),
-      draftList().catch(() => ({ drafts: [] as Draft[], quarantined: [] as string[] })),
+      draftList().catch((err) => {
+        console.warn('Could not list the drafts', err);
+        return { drafts: [] as Draft[], quarantined: [] as string[] };
+      }),
     ]);
-    kindOverrides = kinds && typeof kinds === 'object' ? kinds : {};
+    const session = rawSession && typeof rawSession === 'object' ? rawSession : null;
+    kindOverrides = kinds && typeof kinds === 'object' && !Array.isArray(kinds) ? kinds : {};
     const cutoff = Date.now() - CLOSED_DAYS * 864e5;
     set({
-      recents: Array.isArray(recents) ? recents : [],
-      closed: Array.isArray(closed) ? closed.filter((c) => c.closedAt > cutoff).slice(-CLOSED_KEEP) : [],
-      zoom: typeof zoom === 'number' ? zoom : 1,
+      recents: Array.isArray(recents) ? recents.filter((r) => r && typeof r.path === 'string') : [],
+      closed: Array.isArray(closed)
+        ? trimClosed(closed.filter((c) => c && typeof c.closedAt === 'number' && c.closedAt > cutoff && (typeof c.path === 'string' || typeof c.content === 'string')))
+        : [],
+      zoom: typeof zoom === 'number' && Number.isFinite(zoom) ? zoom : 1,
       ...(session
         ? {
             sidebarOpen: session.sidebarOpen ?? true,
             sidebarTab: session.sidebarTab ?? 'outline',
             sidebarWidth: session.sidebarWidth ?? 248,
-            folder: session.folder ?? null,
-            lastMode: session.lastMode ?? 'read',
+            folder: typeof session.folder === 'string' ? session.folder : null,
+            lastMode: asMode(session.lastMode, 'read'),
           }
         : {}),
     });
 
-    const drafts = new Map(list.drafts.filter((d) => d && typeof d.id === 'string').map((d) => [d.id, d]));
-    list.drafts.forEach((d) => onDisk.add(d.id));
+    const cleaned = (Array.isArray(list.drafts) ? list.drafts : []).map(cleanDraft);
+    const drafts = new Map(cleaned.filter((d): d is Draft => !!d).map((d) => [d.id, d]));
+    drafts.forEach((_d, id) => onDisk.add(id));
     const restore = useSettings.getState().settings.restoreSession;
-    const tabs: SessionTab[] =
+    const tabs: SessionTab[] = (
       session?.version === 2 && Array.isArray(session.tabs)
-        ? session.tabs
-        : (session?.open ?? []).map((o) => ({
-            id: newId(),
-            path: o.path,
-            name: baseName(o.path),
-            mode: o.mode,
-            kind: kindFor(o.path),
-            scroll: o.scroll,
-            encoding: 'UTF-8',
-          }));
-    const docs: Doc[] = [];
-    const conflicts: string[] = [];
+        ? session.tabs.map(cleanTab)
+        : (Array.isArray(session?.open) ? session.open : [])
+            .filter((o) => o && typeof o.path === 'string')
+            .map((o) => cleanTab({ id: newId(), path: o.path, mode: o.mode, kind: kindFor(o.path), scroll: o.scroll }))
+    ).filter((t): t is SessionTab => !!t);
+
+    // Which tabs come back: listed tabs (all of them, or only those with unsaved text when
+    // "restore session" is off), then drafts the session doesn't list (a crash between
+    // creating a tab and saving the session).
+    const jobs: { tab: SessionTab; draft: Draft | undefined }[] = [];
     for (const tab of tabs) {
       const draft = drafts.get(tab.id);
       drafts.delete(tab.id);
-      // Unsaved text always comes back, even with "restore session" off.
-      if (!restore && !draft) continue;
-      const doc = await restoreTab(tab, draft, conflicts);
-      if (doc) docs.push(doc);
+      if (restore || draft) jobs.push({ tab, draft });
     }
-    // Drafts the session doesn't list (a crash between creating a tab and saving the session).
     for (const draft of [...drafts.values()].sort((a, b) => a.updatedAt - b.updatedAt)) {
-      const tab: SessionTab = {
-        id: draft.id,
-        path: draft.path,
-        name: draft.name,
-        mode: (draft.mode as ViewMode) ?? 'edit',
-        kind: (draft.kind as DocKind) ?? 'markdown',
-        scroll: 0,
-        encoding: draft.diskEncoding ?? draft.encoding ?? 'UTF-8',
-      };
-      const doc = await restoreTab(tab, draft, conflicts);
-      if (doc) docs.push(doc);
+      jobs.push({
+        draft,
+        tab: {
+          id: draft.id,
+          path: draft.path,
+          name: draft.name,
+          mode: asMode(draft.mode, 'edit'),
+          kind: asKind(draft.kind, 'markdown'),
+          scroll: 0,
+          encoding: draft.diskEncoding ?? draft.encoding ?? 'UTF-8',
+        },
+      });
+    }
+
+    // Files are read side by side, so a session with many tabs opens as fast as its slowest file.
+    const conflicts: string[] = [];
+    const restored = await mapLimit(jobs, 6, ({ tab, draft }) =>
+      restoreTab(tab, draft, conflicts).catch((err) => {
+        // One broken tab must never stop the others: keep its text as an untitled note.
+        console.error('Could not restore a tab', err);
+        return draft ? recoveredCopy(draft.name, draft.content, asKind(draft.kind, 'markdown'), asMode(draft.mode, 'edit'), draft.id) : null;
+      }),
+    );
+
+    // One writable tab per file. A second tab for the same file keeps its own unsaved text as
+    // an untitled copy, so neither version is lost and saves can't overwrite each other.
+    const docs: Doc[] = [];
+    for (const doc of restored) {
+      if (!doc) continue;
+      const twin = doc.path ? docs.find((d) => d.path && samePath(d.path, doc.path as string)) : undefined;
+      if (!twin) docs.push(doc);
+      else if (isDirty(doc) && doc.content !== twin.content) docs.push(recoveredCopy(doc.name, doc.content, doc.kind, doc.mode, doc.id));
     }
     const activeId =
       (session?.activeId && docs.find((d) => d.id === session.activeId)?.id) ??
@@ -612,6 +853,13 @@ export const useApp = create<AppStore>((set, get) => ({
       seen.set(d.id, snapshotOf(d));
       if (!needsDraft(d) && onDisk.has(d.id)) scheduleDraft(d.id);
     });
+    // Drafts of duplicate tabs whose text another tab already holds.
+    for (const id of [...onDisk]) {
+      if (!docs.some((d) => d.id === id)) void chain(id, async () => {
+        await draftDelete(id);
+        onDisk.delete(id);
+      });
+    }
     useApp.subscribe((s, prev) => {
       if (s.docs !== prev.docs) syncDrafts(s.docs);
     });
@@ -623,9 +871,21 @@ export const useApp = create<AppStore>((set, get) => ({
       toast.action({
         kind: 'warn',
         title: `${d.name} changed while Margin was closed`,
-        body: 'Your unsaved version is showing. Save to keep it, or take the version on disk.',
-        actionLabel: "Take the file's",
-        onAction: () => void get().reload(id),
+        body: "Your unsaved version is showing. Compare them, or choose Keep mine or Use the file's in the status bar.",
+        actionLabel: 'Compare',
+        onAction: () => void get().resolveConflict(id, 'compare'),
+        sticky: true,
+      });
+    }
+    for (const d of docs.filter((x) => x.diskError)) {
+      toast.action({
+        kind: 'warn',
+        title: `Couldn't read ${d.name}`,
+        body: isDirty(d)
+          ? `${d.diskError} Your unsaved text is showing. Saving checks the file first.`
+          : `${d.diskError}`,
+        actionLabel: 'Try again',
+        onAction: () => void get().retryDisk(d.id),
         sticky: true,
       });
     }
@@ -657,6 +917,7 @@ export const useApp = create<AppStore>((set, get) => ({
         const kind = kindFor(f.path, f.size);
         const doc = docFromFile(f, kind === 'markdown' ? initialMode(get().lastMode) : 'source', 0, newId(), kind);
         if (f.size > BIG_FILE) toast.info(`${f.name} is large`, 'Opened as plain text so it stays fast.');
+        noteFileQuirks(f);
         // Replace a pristine untitled tab rather than leaving it behind.
         const blank = get().docs.find((d) => !d.path && d.content === '' && d.saved === '');
         if (blank) dropDraft(blank.id);
@@ -705,63 +966,123 @@ export const useApp = create<AppStore>((set, get) => ({
     const idx = docs.findIndex((d) => d.id === id);
     if (idx < 0) return;
     const doc = docs[idx];
-    if (doc.path) void unwatchFile(doc.path);
     const next = docs.filter((d) => d.id !== id);
+    // Only unwatch when no other tab shows the same file.
+    if (doc.path && !next.some((d) => d.path && samePath(d.path, doc.path as string))) void unwatchFile(doc.path);
     const keepText = !doc.path || isDirty(doc);
-    const worthKeeping = doc.path || doc.content.trim() !== '';
-    const closed = worthKeeping
-      ? [
-          ...get().closed,
-          {
-            path: doc.path,
-            name: displayName(doc),
-            kind: doc.kind,
-            mode: doc.mode,
-            encoding: doc.encoding,
-            bom: doc.bom,
-            diskEncoding: doc.diskEncoding,
-            eol: doc.eol,
-            savedHash: keepText && doc.path ? hashText(doc.saved) : undefined,
-            content: keepText ? doc.content : undefined,
-            closedAt: Date.now(),
-          },
-        ].slice(-CLOSED_KEEP)
-      : get().closed;
+    const worthKeeping = !doc.transient && (!!doc.path || doc.content.trim() !== '');
+    const record: ClosedTab | null = worthKeeping
+      ? {
+          path: doc.path,
+          name: displayName(doc),
+          kind: doc.kind,
+          mode: doc.mode,
+          encoding: doc.encoding,
+          bom: doc.bom,
+          diskEncoding: doc.diskEncoding,
+          eol: doc.eol,
+          savedHash: keepText && doc.path ? savedHash(doc) : undefined,
+          content: keepText ? doc.content : undefined,
+          closedAt: Date.now(),
+        }
+      : null;
     set({
       docs: next,
-      closed,
+      closed: record ? trimClosed([...get().closed, record]) : get().closed,
       activeId: activeId === id ? (next[idx] ?? next[idx - 1] ?? null)?.id ?? null : activeId,
     });
-    if (worthKeeping) persistClosed(closed);
-    dropDraft(id);
     void persistSession();
+    if (!record || !keepText) {
+      if (record) void persistClosed().catch((err) => console.warn('Could not save closed tabs', err));
+      dropDraft(id);
+      return;
+    }
+    // The tab's text now lives in two places: its draft, and the closed-tab history. The draft
+    // is deleted only once the history is safely on disk; if that write fails the draft stays,
+    // and the note comes back as a tab at the next start instead of being lost.
+    const p = pending.get(id);
+    if (p) clearTimeout(p.timer);
+    pending.delete(id);
+    clearTimeout(autosaveTimers.get(id));
+    autosaveTimers.delete(id);
+    seen.delete(id);
+    const hadDraft = onDisk.has(id) || needsDraft(doc);
+    void chain(id, async () => {
+      try {
+        await persistClosed();
+      } catch (err) {
+        if (!onDisk.has(id) && hadDraft) {
+          // Nothing on disk yet (closed within a second of typing): write the draft now.
+          await draftWrite(toDraft(doc));
+          onDisk.add(id);
+        }
+        toast.warn(`Couldn't add ${displayName(doc)} to closed tabs`, 'Its text is kept and reopens as a tab the next time Margin starts.');
+        throw err;
+      }
+      await draftDelete(id);
+      onDisk.delete(id);
+      savedHashes.delete(id);
+    });
   },
 
   async reopenClosed() {
-    const closed = [...get().closed];
-    const last = closed.pop();
+    const last = get().closed[get().closed.length - 1];
     if (!last) {
       toast.info('No closed tabs to reopen');
       return;
     }
-    set({ closed });
-    persistClosed(closed);
-    if (last.content === undefined && last.path) return get().openPaths([last.path]);
+    // The record stays in the history until the tab is back.
+    const done = () => {
+      set((s) => ({ closed: s.closed.filter((c) => c !== last) }));
+      void persistClosed().catch((err) => console.warn('Could not save closed tabs', err));
+    };
+    const open = last.path ? get().docs.find((d) => d.path && samePath(d.path, last.path as string)) : undefined;
+    if (open) {
+      // The file is open again already: never make a second writable tab for it. Unsaved text
+      // that differs comes back as its own untitled copy.
+      flushEditors();
+      if (last.content !== undefined && last.content !== open.content) {
+        const copy = recoveredCopy(last.name, last.content, last.kind, last.mode);
+        set((s) => ({ docs: [...s.docs, copy], activeId: copy.id }));
+        toast.info(`${last.name} is already open`, 'Your closed version opened as a separate note.');
+      } else get().activate(open.id);
+      done();
+      void persistSession();
+      return;
+    }
+    if (last.content === undefined && last.path) {
+      await get().openPaths([last.path]);
+      if (get().docs.some((d) => d.path && samePath(d.path, last.path as string))) done();
+      return;
+    }
     let doc = makeDoc(last.path, last.name, last.content ?? '', 0, last.mode, false, 0, last.kind);
     doc = { ...doc, encoding: last.encoding, bom: last.bom, eol: detectEol(doc.content, last.eol) };
     if (last.path) {
-      const f = await readFile(last.path, { encoding: last.diskEncoding ?? last.encoding }).catch(() => null);
-      if (f) {
+      try {
+        const f = await readFile(last.path, { encoding: last.diskEncoding ?? last.encoding });
         doc = {
           ...doc, name: f.name, saved: f.content, mtimeMs: f.mtimeMs, readonly: f.readonly,
-          diskEncoding: f.encoding, diskBom: f.bom,
+          diskEncoding: f.encoding, diskBom: f.bom, version: f.version,
           conflict: !!last.savedHash && last.savedHash !== hashText(f.content) && doc.content !== f.content,
         };
         void watchFile(f.path);
-      } else doc = { ...doc, saved: '', missing: true };
+      } catch (err) {
+        doc = errorKind(err) === 'notfound'
+          ? { ...doc, saved: '', missing: true }
+          : { ...doc, saved: '', diskError: errorMessage(err), diskEncoding: last.diskEncoding ?? last.encoding };
+      }
     } else doc = { ...doc, saved: '' };
+    // Another reopen may have opened the same file while this one was reading it.
+    if (doc.path && get().docs.some((d) => d.path && samePath(d.path, doc.path as string))) return get().reopenClosed();
     set((s) => ({ docs: [...s.docs, doc], activeId: doc.id }));
+    done();
     void persistSession();
+  },
+
+  clearClosed() {
+    set({ closed: [] });
+    void persistClosed().catch((err) => toast.error("Couldn't clear closed tabs", errorMessage(err)));
+    toast.success('Closed tab history cleared');
   },
 
   activate(id) {
@@ -878,40 +1199,58 @@ export const useApp = create<AppStore>((set, get) => ({
     void persistSession();
   },
 
-  async save(id) {
+  async save(id, opts) {
     flushEditors();
     const doc = get().docs.find((d) => d.id === (id ?? get().activeId));
-    if (!doc) return false;
+    if (!doc || doc.transient) return false;
     if (!doc.path || doc.readonly) return get().saveAs(doc.id);
     if (!isDirty(doc)) return true;
     if (saving.has(doc.id)) return false;
+    if (doc.lossy && !opts?.force) {
+      toast.action({
+        kind: 'warn',
+        title: `Save ${doc.name} anyway?`,
+        body: `Some bytes weren't valid ${doc.diskEncoding} and show as �. Saving writes � in their place.`,
+        actionLabel: 'Save anyway',
+        onAction: () => void get().save(doc.id, { force: true }),
+      });
+      return false;
+    }
     saving.add(doc.id);
     try {
       const text = normaliseForSave(doc);
-      const { mtimeMs } = await writeFile(doc.path, text, doc);
+      // The version this text was based on. A tab whose file was missing or unreadable expects
+      // no file at all, so a file that has appeared since is never overwritten unseen.
+      const expected = doc.version ?? 'absent';
+      const result = await writeFile(doc.path, text, doc, { expected, force: opts?.force });
       flushEditors();
       set((s) => ({
-        docs: s.docs.map((d) => d.id === doc.id ? savedFile(d, doc, text, mtimeMs, doc) : d),
+        docs: s.docs.map((d) => d.id === doc.id ? savedFile(d, doc, text, result, doc) : d),
       }));
       void persistSession();
       return true;
     } catch (err) {
-      const msg = String(err instanceof Error ? err.message : err);
-      if (msg.startsWith('UNMAPPABLE:')) {
+      const kind = errorKind(err);
+      if (kind === 'unmappable') {
         toast.action({
           kind: 'warn',
           title: `${doc.name} has characters ${doc.encoding} can't hold`,
-          body: msg.replace(/^UNMAPPABLE:\s*/, ''),
+          body: errorMessage(err),
           actionLabel: 'Save as UTF-8',
           onAction: () => {
             get().setEncoding(doc.id, 'UTF-8', false);
             void get().save(doc.id);
           },
         });
-      } else toast.error(`Couldn't save ${doc.name}`, msg);
+      } else if (kind === 'conflict') {
+        set((s) => ({ docs: s.docs.map((d) => (d.id === doc.id ? { ...d, conflict: true } : d)) }));
+        conflictToast(doc.id, `${doc.name} changed on disk`, 'It was not saved, so the other version is safe. Choose which to keep.');
+      } else toast.error(`Couldn't save ${doc.name}`, errorMessage(err));
       return false;
     } finally {
       saving.delete(doc.id);
+      // A change on disk reported while saving was held back: look at it now.
+      if (recheck.delete(doc.id) && doc.path) void get().handleExternalChange(doc.path, 'modified');
     }
   },
 
@@ -919,6 +1258,10 @@ export const useApp = create<AppStore>((set, get) => ({
     flushEditors();
     const doc = get().docs.find((d) => d.id === (id ?? get().activeId));
     if (!doc || saving.has(doc.id)) return false;
+    if (doc.transient) {
+      toast.info('This is the version on disk, shown for comparing', 'Copy what you need into your own tab.');
+      return false;
+    }
     const suggested = doc.path && !doc.binary ? doc.name : fileNameFor(doc);
     saving.add(doc.id);
     try {
@@ -931,21 +1274,35 @@ export const useApp = create<AppStore>((set, get) => ({
         toast.warn('That file is already open', 'Choose a different name or save from its open tab.');
         return false;
       }
-      const text = normaliseForSave(snapshot);
+      // Images pasted into a note before it had a file were kept inline; now that it has a
+      // folder they become files beside it, like images pasted into a saved note.
+      let source = snapshot;
+      if (isTauri && snapshot.kind === 'markdown' && snapshot.content.includes('](data:image/')) {
+        const folderSetting = useSettings.getState().settings.imageFolder.trim();
+        const { text: relinked, images } = extractDataImages(snapshot.content, folderSetting);
+        if (images.length) {
+          for (const image of images) await writeBinary(joinPath(dirName(path), image.path.replace(/\//g, '\\')), image.bytes);
+          source = { ...snapshot, content: relinked };
+        }
+      }
+      const text = normaliseForSave(source);
       const encoding = snapshot.binary ? 'UTF-8' : snapshot.encoding;
       const bom = snapshot.binary ? false : snapshot.bom;
-      const { mtimeMs } = await writeFile(path, text, { encoding, bom });
+      const result = await writeFile(path, text, { encoding, bom });
       if (!isTauri) downloadText(baseName(path), text, snapshot.kind === 'text' ? 'text/plain' : 'text/markdown');
       flushEditors();
       if (get().docs.some((d) => d.id === doc.id)) {
         if (snapshot.path && !samePath(snapshot.path, path)) void unwatchFile(snapshot.path);
         void watchFile(path);
       }
+      const relinked = source !== snapshot;
       set((s) => ({
         docs: s.docs.map((d) =>
           d.id === doc.id
             ? {
-                ...savedFile(d, snapshot, text, mtimeMs, { encoding, bom }),
+                ...savedFile(d, snapshot, text, result, { encoding, bom }),
+                // Edits typed while saving are kept; otherwise the editor shows the linked images.
+                ...(relinked && d.content === snapshot.content ? { content: text, rev: d.rev + 1 } : {}),
                 path,
                 name: baseName(path),
                 binary: false,
@@ -969,7 +1326,7 @@ export const useApp = create<AppStore>((set, get) => ({
   async saveAll() {
     flushEditors();
     for (const d of get().docs) {
-      if (d.path && !d.readonly && !d.conflict && isDirty(d)) await get().save(d.id);
+      if (d.path && !d.readonly && !d.conflict && !d.diskError && !d.lossy && !d.transient && isDirty(d)) await get().save(d.id);
     }
   },
 
@@ -977,6 +1334,8 @@ export const useApp = create<AppStore>((set, get) => ({
     flushEditors();
     const doc = get().docs.find((d) => d.id === id);
     if (!doc?.path) return;
+    // Reloading over unsaved text keeps that text in closed tabs, so it can come back.
+    if (!silent && isDirty(doc) && !doc.missing) return get().resolveConflict(id, 'disk');
     try {
       const f = await readFile(doc.path, { encoding: doc.diskEncoding, force: doc.binary });
       flushEditors();
@@ -995,9 +1354,116 @@ export const useApp = create<AppStore>((set, get) => ({
     }
   },
 
+  async resolveConflict(id, how) {
+    flushEditors();
+    const doc = get().docs.find((d) => d.id === id);
+    if (!doc?.path) return;
+    if (how === 'overwrite') {
+      if (await get().save(id, { force: true })) toast.success('Saved your version', doc.name);
+      return;
+    }
+    if (how === 'copy') {
+      await get().saveAs(id);
+      return;
+    }
+    let disk: FileData;
+    try {
+      disk = await readFile(doc.path, { encoding: doc.diskEncoding, force: doc.binary });
+    } catch (err) {
+      toast.error(`Couldn't read ${doc.name}`, errorMessage(err));
+      return;
+    }
+    if (how === 'compare') {
+      // The disk version opens beside yours, read-only, so the two can be compared tab to tab.
+      const name = `${doc.name} (on disk)`;
+      const existing = get().docs.find((d) => d.transient && d.name === name);
+      const view: Doc = {
+        ...makeDoc(null, name, disk.content, disk.mtimeMs, 'source', true, 0, doc.kind),
+        transient: true,
+        eol: detectEol(disk.content, doc.eol),
+      };
+      set((s) => {
+        const docs = existing ? s.docs.filter((d) => d.id !== existing.id) : s.docs;
+        const at = docs.findIndex((d) => d.id === id);
+        return { docs: [...docs.slice(0, at + 1), view, ...docs.slice(at + 1)], activeId: view.id };
+      });
+      return;
+    }
+    // Take the disk version. Your text goes to closed tabs first, so Ctrl+Shift+T brings it back.
+    flushEditors();
+    const current = get().docs.find((d) => d.id === id);
+    if (!current) return;
+    if (current.content !== disk.content) {
+      const record: ClosedTab = {
+        path: null,
+        name: `${displayName(current)} (your version)`,
+        kind: current.kind,
+        mode: current.mode,
+        encoding: current.encoding,
+        bom: current.bom,
+        eol: current.eol,
+        content: current.content,
+        closedAt: Date.now(),
+      };
+      set((s) => ({ closed: trimClosed([...s.closed, record]) }));
+      try {
+        await persistClosed();
+      } catch (err) {
+        toast.error("Couldn't keep a copy of your version, so nothing was replaced", errorMessage(err));
+        return;
+      }
+    }
+    set((s) => ({ docs: s.docs.map((d) => (d.id === id ? refreshedFile(d, disk) : d)) }));
+    void persistSession();
+    toast.action({
+      kind: 'info',
+      title: 'Showing the version on disk',
+      body: 'Your version is in closed tabs.',
+      actionLabel: 'Bring mine back',
+      onAction: () => void get().reopenClosed(),
+    });
+  },
+
+  async retryDisk(id) {
+    const doc = get().docs.find((d) => d.id === id);
+    if (!doc?.path) return;
+    let f: FileData;
+    try {
+      f = await readFile(doc.path, { encoding: doc.diskEncoding, force: doc.binary });
+    } catch (err) {
+      if (errorKind(err) === 'notfound') {
+        set((s) => ({ docs: s.docs.map((d) => (d.id === id ? { ...d, diskError: null, missing: true, readonly: false } : d)) }));
+        toast.warn(`${doc.name} isn't there any more`, 'Save to write your copy back.');
+      } else toast.error(`Still couldn't read ${doc.name}`, errorMessage(err));
+      return;
+    }
+    flushEditors();
+    const current = get().docs.find((d) => d.id === id);
+    if (!current) return;
+    void watchFile(f.path);
+    const hadText = isDirty(current) && current.content !== '';
+    set((s) => ({
+      docs: s.docs.map((d) => {
+        if (d.id !== id) return d;
+        const fresh = refreshedFile(d, f);
+        // Unsaved text stays on screen; it becomes a conflict if the file differs from it.
+        return hadText ? { ...fresh, content: d.content, rev: d.rev + 1, conflict: d.content !== f.content } : fresh;
+      }),
+    }));
+    void persistSession();
+    if (hadText && current.content !== f.content) {
+      conflictToast(id, `${doc.name} can be read again`, 'It differs from your unsaved text. Choose which to keep.');
+    } else toast.success(`Opened ${doc.name}`);
+  },
+
   async handleExternalChange(path, kind) {
     const doc = get().docs.find((d) => d.path && samePath(d.path, path));
     if (!doc) return;
+    if (saving.has(doc.id)) {
+      // Looked at again once the save finishes, against the version it wrote.
+      recheck.add(doc.id);
+      return;
+    }
     if (kind === 'removed') {
       const meta = await fileMeta(path).catch(() => null);
       if (meta?.exists) return get().handleExternalChange(path, 'modified');
@@ -1015,8 +1481,19 @@ export const useApp = create<AppStore>((set, get) => ({
     }
     flushEditors();
     const current = get().docs.find((d) => d.id === doc.id);
-    if (!current || current.path !== doc.path || current.diskEncoding !== doc.diskEncoding || saving.has(doc.id)) return;
-    if (disk.content === current.saved && disk.bom === current.diskBom && !current.missing && disk.readonly === current.readonly) return;
+    if (!current || current.path !== doc.path || current.diskEncoding !== doc.diskEncoding) return;
+    if (saving.has(doc.id)) {
+      recheck.add(doc.id);
+      return;
+    }
+    if (disk.content === current.saved && disk.bom === current.diskBom && !current.missing && disk.readonly === current.readonly) {
+      // Same text (touched, or rewritten identically): just remember the new version, so the
+      // next save isn't mistaken for overwriting someone else's change.
+      if (disk.version !== current.version) {
+        set((s) => ({ docs: s.docs.map((d) => (d.id === doc.id ? { ...d, version: disk.version, mtimeMs: disk.mtimeMs } : d)) }));
+      }
+      return;
+    }
     const dirty = isDirty(current);
     if (!dirty && useSettings.getState().settings.autoReload) {
       set((s) => ({ docs: s.docs.map((d) => d.id === doc.id ? refreshedFile(d, disk) : d) }));
@@ -1024,14 +1501,17 @@ export const useApp = create<AppStore>((set, get) => ({
       toast.info('Updated from disk', doc.name);
     } else if (!current.conflict) {
       set((s) => ({ docs: s.docs.map((d) => (d.id === doc.id ? { ...d, conflict: true } : d)) }));
-      toast.action({
-        kind: 'warn',
-        title: `${doc.name} changed on disk`,
-        body: dirty ? 'You have unsaved edits here.' : 'Reload to see the new version.',
-        actionLabel: 'Reload',
-        onAction: () => void get().reload(doc.id),
-        sticky: true,
-      });
+      if (dirty) conflictToast(doc.id, `${doc.name} changed on disk`, 'You have unsaved edits here. Choose which version to keep.');
+      else {
+        toast.action({
+          kind: 'warn',
+          title: `${doc.name} changed on disk`,
+          body: 'Reload to see the new version.',
+          actionLabel: 'Reload',
+          onAction: () => void get().reload(doc.id),
+          sticky: true,
+        });
+      }
     }
   },
 
@@ -1095,6 +1575,9 @@ function makeDoc(
     binary: false,
     conflict: false,
     missing: false,
+    version: null,
+    diskError: null,
+    lossy: false,
   };
 }
 

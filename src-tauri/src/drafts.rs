@@ -81,13 +81,20 @@ fn draft_list_sync(dir: &Path) -> Result<DraftList, String> {
         .collect();
     files.sort();
     for file in files {
-        let parsed = fs::read_to_string(&file)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            .filter(Value::is_object);
-        match parsed {
-            Some(value) => list.drafts.push(value),
-            None => {
+        let text = match fs::read_to_string(&file) {
+            Ok(text) => text,
+            // Locked or unreadable right now (antivirus, sync client): leave it for next time
+            // instead of calling a healthy draft damaged.
+            Err(err) if err.kind() != io::ErrorKind::InvalidData => continue,
+            Err(_) => String::new(),
+        };
+        let stem = file
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match serde_json::from_str::<Value>(&text) {
+            Ok(value) if is_valid_draft(&value, &stem) => list.drafts.push(value),
+            _ => {
                 let name = file
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
@@ -100,6 +107,17 @@ fn draft_list_sync(dir: &Path) -> Result<DraftList, String> {
     Ok(list)
 }
 
+/// A draft the frontend can restore: an object whose `id` matches its file name and whose
+/// `content` is text. Anything else is kept aside rather than allowed to break startup.
+fn is_valid_draft(value: &Value, stem: &str) -> bool {
+    let id_ok = value.get("id").and_then(Value::as_str) == Some(stem);
+    let content_ok = value.get("content").is_some_and(Value::is_string);
+    let path_ok = value
+        .get("path")
+        .is_none_or(|path| path.is_null() || path.is_string());
+    value.is_object() && id_ok && content_ok && path_ok
+}
+
 /// The app was renamed from MD Viewer. On the first launch under the new identifier, copy the old
 /// settings, session and drafts across (the old folder is left untouched).
 pub fn migrate_from_old_identifier(app: &AppHandle, old_identifier: &str) {
@@ -107,11 +125,30 @@ pub fn migrate_from_old_identifier(app: &AppHandle, old_identifier: &str) {
     let Some(old_dir) = new_dir.parent().map(|parent| parent.join(old_identifier)) else {
         return;
     };
-    if new_dir.join("settings.json").exists() || !old_dir.is_dir() {
+    let done = new_dir.join(MIGRATED_MARKER);
+    let started = new_dir.join(MIGRATING_MARKER);
+    if done.exists() || !old_dir.is_dir() {
         return;
     }
-    let _ = copy_dir(&old_dir, &new_dir);
+    // A profile that ran under the new name before these markers existed finished long ago:
+    // copying again would bring back drafts that were closed since.
+    if !started.exists() && new_dir.join("settings.json").exists() {
+        let _ = fs::write(done, old_identifier);
+        return;
+    }
+    if fs::create_dir_all(&new_dir).is_err() || fs::write(&started, old_identifier).is_err() {
+        return;
+    }
+    // The copy never overwrites, so an interrupted one simply carries on at the next launch.
+    if copy_dir(&old_dir, &new_dir).is_ok() && fs::write(&done, old_identifier).is_ok() {
+        let _ = fs::remove_file(started);
+    }
 }
+
+/// Written once the settings of the old MD Viewer identifier have been fully copied.
+const MIGRATED_MARKER: &str = "migrated-from-mdviewer";
+/// Present while a copy is under way, so an interrupted copy is resumed.
+const MIGRATING_MARKER: &str = "migrating-from-mdviewer";
 
 fn copy_dir(from: &Path, to: &Path) -> io::Result<()> {
     fs::create_dir_all(to)?;
@@ -156,12 +193,26 @@ mod tests {
     fn damaged_drafts_are_quarantined_not_fatal() {
         let dir = tempfile::tempdir().expect("temp dir");
         let folder = dir.path().join("drafts");
-        draft_write_sync(&folder, "good", &json!({ "id": "good" })).expect("write");
+        draft_write_sync(&folder, "good", &json!({ "id": "good", "content": "" })).expect("write");
         fs::write(folder.join("half.json"), "{ \"id\": \"ha").expect("write damaged");
         let list = draft_list_sync(&folder).expect("list");
         assert_eq!(list.drafts.len(), 1);
         assert_eq!(list.quarantined, vec!["half.json".to_owned()]);
         assert!(folder.join("half.json.bad").exists());
+    }
+
+    #[test]
+    fn drafts_without_text_or_a_matching_id_are_quarantined() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let folder = dir.path().join("drafts");
+        draft_write_sync(&folder, "ok", &json!({ "id": "ok", "content": "", "path": null })).expect("write");
+        draft_write_sync(&folder, "nocontent", &json!({ "id": "nocontent", "path": "C:\\a.md" })).expect("write");
+        draft_write_sync(&folder, "wrongid", &json!({ "id": "other", "content": "x" })).expect("write");
+        draft_write_sync(&folder, "badpath", &json!({ "id": "badpath", "content": "x", "path": 3 })).expect("write");
+        let list = draft_list_sync(&folder).expect("list");
+        assert_eq!(list.drafts.len(), 1);
+        assert_eq!(list.drafts[0]["id"], "ok");
+        assert_eq!(list.quarantined.len(), 3);
     }
 
     #[test]

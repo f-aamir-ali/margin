@@ -16,12 +16,13 @@ import { Button, SPRING, TooltipLayer } from './components/ui/controls';
 import { handleShortcut, requestQuit, runCommand } from './lib/commands';
 import { appWindow, onFileChanged, onFilesDropped, onOpenFiles } from './lib/platform';
 import { activeTheme, applySettings, isDarkTheme, useSettings, type ViewMode } from './lib/settings';
-import { activeDoc, displayName, flushAll, isDirty, useApp, viewMode, type Doc } from './lib/store';
+import { activeDoc, canAutosave, displayName, flushAll, flushEditors, isDirty, useApp, viewMode, type Doc } from './lib/store';
 import { attachSounds, play } from './lib/sound';
 import { countWords } from './lib/stats';
 import { toast } from './lib/toast';
 import { useUi } from './lib/ui';
 import { useView } from './lib/viewSync';
+import { useFocusTrap } from './lib/focusTrap';
 
 // The editors are heavy and Reading mode is the default: load them only when first used.
 const Source = lazy(() => import('./components/Source').then((m) => ({ default: m.Source })));
@@ -144,24 +145,15 @@ export default function App() {
     };
   }, []);
 
-  // Auto-save.
-  const content = doc?.content;
-  const encoding = doc?.encoding;
-  const bom = doc?.bom;
-  const autoSaveId = doc?.path && !doc.readonly && !doc.conflict && isDirty(doc) ? doc.id : null;
-  useEffect(() => {
-    if (settings.autoSave !== 'delay' || !autoSaveId) return;
-    const t = setTimeout(() => {
-      const app = useApp.getState();
-      const current = app.docs.find((d) => d.id === autoSaveId);
-      if (current && !current.conflict && !current.readonly) void app.save(autoSaveId);
-    }, settings.autoSaveDelay * 1000);
-    return () => clearTimeout(t);
-  }, [content, encoding, bom, settings.autoSave, settings.autoSaveDelay, autoSaveId]);
-
+  // Auto-save after a pause in typing is per document and lives in the store, so tabs in the
+  // background are saved too. Saving when the window loses focus is handled here.
   useEffect(() => {
     if (settings.autoSave !== 'blur') return;
-    const onBlur = () => void useApp.getState().saveAll();
+    const onBlur = () => {
+      flushEditors();
+      const app = useApp.getState();
+      for (const d of app.docs) if (canAutosave(d)) void app.save(d.id);
+    };
     window.addEventListener('blur', onBlur);
     return () => window.removeEventListener('blur', onBlur);
   }, [settings.autoSave]);
@@ -346,7 +338,8 @@ function ConfirmClose() {
   const req = useUi((s) => s.confirmClose);
   const docs = useApp((s) => s.docs);
   const saveRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => saveRef.current?.focus(), []);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(dialogRef, saveRef);
   if (!req) return null;
   const targets = docs.filter((d) => req.ids.includes(d.id));
   const done = () => useUi.getState().setConfirmClose(null);
@@ -364,15 +357,17 @@ function ConfirmClose() {
   return (
     <motion.div className="overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, transition: { duration: 0.12 } }} onMouseDown={(e) => e.target === e.currentTarget && done()}>
       <motion.div
+        ref={dialogRef}
         className="dialog popover"
         role="alertdialog"
-        aria-label="Unsaved changes"
+        aria-modal="true"
+        aria-labelledby="confirm-close-title"
         initial={{ opacity: 0, y: 14, scale: 0.96 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.12 } }}
         transition={SPRING}
       >
-        <h2>{one ? `Save ${displayName(targets[0])}?` : `Save changes to ${targets.length} notes?`}</h2>
+        <h2 id="confirm-close-title">{one ? `Save ${displayName(targets[0])}?` : `Save changes to ${targets.length} notes?`}</h2>
         <p>
           {one ? (targets[0].path ? 'This tab has edits that are not in the file yet.' : 'This note is not in a file yet.') : targets.map(displayName).join(', ')}{' '}
           <span className="dialog-hint">If you close without saving, Ctrl+Shift+T brings it back.</span>

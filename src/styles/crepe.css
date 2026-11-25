@@ -90,8 +90,13 @@
   margin: 0 0 var(--doc-para-gap);
   line-height: var(--doc-leading);
 }
-.prose.editor .milkdown .ProseMirror li p {
-  margin-bottom: 0.3em;
+/* Paragraphs inside list items: the reader's rule (li > p: 0.5em, the last one none). Crepe puts them in
+   .children > .content-dom. */
+.prose.editor .milkdown .ProseMirror .milkdown-list-item-block .children > .content-dom > p {
+  margin-bottom: 0.5em;
+}
+.prose.editor .milkdown .ProseMirror .milkdown-list-item-block .children > .content-dom > p:last-child {
+  margin-bottom: 0;
 }
 .prose.editor .milkdown .ProseMirror :not(pre) > code {
   display: inline;
@@ -103,7 +108,7 @@
   line-height: inherit;
 }
 .prose.editor .milkdown .ProseMirror a {
-  color: var(--accent);
+  color: var(--accent-text);
   text-decoration-color: color-mix(in srgb, var(--accent) 36%, transparent);
   text-decoration-thickness: 1.5px;
   text-underline-offset: 0.18em;
@@ -164,7 +169,8 @@
   margin: 0.28em 0;
 }
 .prose.editor .milkdown .milkdown-list-item-block li {
-  gap: 0.35em;
+  /* label 1.5em + gap 0.3em = 1.8em, the same text indent as Reading mode (ul 1.6em + li 0.2em) */
+  gap: 0.3em;
   margin: 0;
   padding: 0;
 }
@@ -206,6 +212,12 @@
 /* ----- code blocks ----- */
 .prose.editor .milkdown .milkdown-code-block {
   margin: 0 0 calc(var(--doc-para-gap) * 1.2);
+  /* Same breakout as Reading mode (see prose.css): widens for long lines, up to the pane. */
+  width: max-content;
+  min-width: 100%;
+  max-width: 100cqw;
+  margin-left: 50%;
+  translate: -50% 0;
   padding: 0 0.3em 0.7em;
   border-radius: 0.85em;
   background: var(--code-bg);
@@ -375,6 +387,22 @@
 /* ----- tables ----- */
 .prose.editor .milkdown .milkdown-table-block {
   margin: 0.6em 0 calc(var(--doc-para-gap) * 1.2);
+}
+/* Reading mode sizes columns to their content (auto layout). Editing does the same, so the two agree, until a
+   column is dragged: ProseMirror then writes data-colwidth and keeps its fixed layout, and that table stays at the
+   measure. Only content-sized tables take the breakout (see prose.css). */
+.prose.editor .milkdown .milkdown-table-block table:not(:has([data-colwidth])) {
+  table-layout: auto;
+}
+.prose.editor .milkdown .milkdown-table-block:not(:has([data-colwidth])) {
+  width: max-content;
+  min-width: 100%;
+  max-width: 100cqw;
+  margin-left: 50%;
+  translate: -50% 0;
+}
+.prose.editor .milkdown .milkdown-table-block th {
+  white-space: nowrap;
 }
 .prose.editor .milkdown .milkdown-table-block table {
   font-size: 0.94em;
@@ -585,7 +613,7 @@
   min-height: 38px;
 }
 .milkdown .milkdown-link-preview > .link-preview > .link-display {
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 13px;
 }
 .milkdown .milkdown-link-preview > .link-preview > .button,
@@ -625,7 +653,7 @@
 }
 
 .milkdown .crepe-placeholder::before {
-  color: var(--text-4);
+  color: var(--text-3);
   font-style: normal;
 }
 

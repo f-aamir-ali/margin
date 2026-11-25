@@ -14,16 +14,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 const MAIN_WINDOW: &str = "main";
 const VK_Z: VIRTUAL_KEY = VIRTUAL_KEY(0x5A);
 
-/// Focuses the main window, then presses Win+Z.
+/// Presses Win+Z when the main window is already in front.
 pub fn show(app: &AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window(MAIN_WINDOW)
         .ok_or("The main window isn't open.")?;
-    // Win+Z goes to whichever window is in front, so don't press it if focusing failed.
-    window
-        .set_focus()
-        .map_err(|err| format!("Couldn't focus the window: {err}."))?;
-    // Never send Win+Z to another app: only press it when Margin really is the front window.
+    // Hovering must never pull Margin in front of the app being used, and Win+Z goes to
+    // whichever window is in front: only press it when Margin already is the front window.
     let hwnd = window.hwnd().map_err(|err| format!("No window handle: {err}."))?;
     if unsafe { GetForegroundWindow() } != hwnd {
         return Err("Margin isn't the front window.".to_owned());

@@ -176,7 +176,7 @@ function SaveState({ doc }: { doc: Doc }) {
       : state === 'new'
         ? 'Kept safe even if you close Margin. Save to put it in a file.'
         : state === 'conflict'
-          ? 'Reload from disk'
+          ? "Use the file's version. Yours stays in closed tabs (Ctrl+Shift+T)."
           : undefined;
   return (
     <button

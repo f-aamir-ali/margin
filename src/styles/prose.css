@@ -17,9 +17,10 @@
   font-optical-sizing: auto;
 }
 
-/* Table documents use the pane, even at the smallest text size. */
-.doc-scroller .prose:has(table) {
-  max-width: none;
+/* The scroller is the pane. Wide tables and code blocks measure against it (cqw), so they can run past the
+   reading measure. Everything else keeps --doc-width. Both Reading and Editing live in this scroller. */
+.doc-scroller {
+  container: pane / inline-size;
 }
 
 .prose :where(h1, h2, h3, h4, h5, h6) {
@@ -117,7 +118,7 @@
 }
 
 .prose :where(a) {
-  color: var(--accent);
+  color: var(--accent-text);
   text-decoration: underline;
   text-decoration-color: color-mix(in srgb, var(--accent) 36%, transparent);
   text-decoration-thickness: 1.5px;
@@ -323,6 +324,12 @@
 .prose .code-block {
   position: relative;
   margin: 0 0 calc(var(--doc-para-gap) * 1.2);
+  /* Widens to its longest line, up to the pane, and is centred on the measure. Short blocks stay at the measure. */
+  width: max-content;
+  min-width: 100%;
+  max-width: 100cqw;
+  margin-left: 50%;
+  translate: -50% 0;
   border-radius: 0.85em;
   background: var(--code-bg);
   box-shadow: inset 0 0 0 1px var(--line);
@@ -408,7 +415,7 @@
   width: 2.2em;
   margin-right: 1.2em;
   text-align: right;
-  color: var(--text-4);
+  color: var(--text-3);
   user-select: none;
   font-variant-numeric: tabular-nums;
 }
@@ -481,6 +488,12 @@
 /* tables */
 .prose .table-wrap {
   margin: 0 0 calc(var(--doc-para-gap) * 1.2);
+  /* Same breakout as code blocks: as wide as the table needs, up to the pane (then it scrolls inside). */
+  width: max-content;
+  min-width: 100%;
+  max-width: 100cqw;
+  margin-left: 50%;
+  translate: -50% 0;
   overflow-x: auto;
   border-radius: 0.8em;
   box-shadow: inset 0 0 0 1px var(--line-2);
@@ -648,7 +661,7 @@
   text-decoration: none;
 }
 .prose nav.toc a:hover {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 .prose :where(details) {
   margin: 0 0 var(--doc-para-gap);

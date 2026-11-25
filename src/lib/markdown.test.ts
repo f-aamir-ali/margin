@@ -73,6 +73,25 @@ describe("headings and ids", () => {
     expect(headings.map((h) => h.id)).toEqual(["a", "a-1", "a-2"]);
   });
 
+  it("gives every one of many identical headings its own id, in order", () => {
+    const src = Array.from({ length: 300 }, () => "## Same").join("\n\n");
+    const ids = renderMarkdown(src).headings.map((h) => h.id);
+    expect(ids).toEqual(["same", ...Array.from({ length: 299 }, (_, i) => `same-${i + 1}`)]);
+  });
+
+  it("keeps ids unique when a heading's own slug is already a -1 suffix", () => {
+    const ids = (src: string) => renderMarkdown(src).headings.map((h) => h.id);
+    // The literal "Intro-1" comes first, so the duplicate "Intro" skips to -2.
+    expect(ids("# Intro-1\n\n# Intro\n\n# Intro")).toEqual(["intro-1", "intro", "intro-2"]);
+    // The literal "Intro-1" comes after the first -1 has been given out.
+    expect(ids("# Intro\n\n# Intro\n\n# Intro-1\n\n# Intro-1")).toEqual(["intro", "intro-1", "intro-1-1", "intro-1-2"]);
+    // "Intro 1" slugifies to "intro-1", so it takes the next free suffix of its own base.
+    expect(ids("# Intro\n\n# Intro\n\n# Intro 1")).toEqual(["intro", "intro-1", "intro-1-1"]);
+    for (const list of [ids("# Intro-1\n\n# Intro\n\n# Intro"), ids("# Intro\n\n# Intro-1\n\n# Intro")]) {
+      expect(new Set(list).size).toBe(list.length);
+    }
+  });
+
   it("returns the same headings from extractHeadings as renderMarkdown", () => {
     const src = "# Intro\n\ntext\n\n## Intro\n\n### Deep *one*\n";
     expect(extractHeadings(src)).toEqual(renderMarkdown(src).headings);
@@ -151,6 +170,75 @@ describe("task lists", () => {
 
   it("leaves a list item that only mentions brackets alone", () => {
     expect(html("- item [x] in the middle")).not.toContain("<input");
+  });
+
+  it("marks the ordered list that holds a task item, not the bullet list around it", () => {
+    const out = html("- Outer plain\n  1. [x] ordered task\n  2. plain");
+    expect(out).toContain('<ol class="contains-task-list">');
+    expect(out).toContain('<ul data-line="0">');
+    expect(out).not.toContain('<ul class="contains-task-list"');
+  });
+
+  it("marks a nested bullet list inside an ordered list, and leaves the ordered list alone", () => {
+    const out = html("1. Step\n   - [ ] sub a\n   - [x] sub b\n2. Next");
+    expect(out).toContain('<ul class="contains-task-list">');
+    expect(out).toContain('<ol data-line="0">');
+    expect(out).not.toContain('<ol class="contains-task-list"');
+  });
+
+  it("marks only the innermost list of a three-level nest", () => {
+    const out = html("- Top\n  1. Mid\n     - [ ] deep");
+    expect(out.match(/contains-task-list/g)).toHaveLength(1);
+    expect(out).toContain('<ul class="contains-task-list">');
+  });
+
+  it("does not mark a list that closed before the task item started", () => {
+    const out = html("- plain a\n- plain b\n\n1. [x] ordered task");
+    expect(out).toContain('<ol class="contains-task-list" data-line="3">');
+    expect(out).not.toContain('<ul class="contains-task-list"');
+  });
+
+  it("marks the outer list again for a task item that follows a nested list", () => {
+    const out = html("- A\n  - B\n- [ ] C");
+    expect(out.match(/contains-task-list/g)).toHaveLength(1);
+    expect(out).toContain('<ul class="contains-task-list" data-line="0">');
+  });
+});
+
+describe("heading cache", () => {
+  it("answers extractHeadings with the same array renderMarkdown just produced", () => {
+    const src = "# One\n\n## Two\n";
+    const { headings } = renderMarkdown(src);
+    expect(extractHeadings(src)).toBe(headings);
+  });
+
+  it("stores the result of extractHeadings, so a second call is a hit", () => {
+    const src = "# Only one heading";
+    const first = extractHeadings(src);
+    expect(extractHeadings(src)).toBe(first);
+  });
+
+  it("parses again for different options, because they can change the headings", () => {
+    const src = "## Hi :smile:";
+    const withEmoji = renderMarkdown(src, { emoji: true }).headings;
+    const without = extractHeadings(src, { emoji: false });
+    expect(without).not.toBe(withEmoji);
+    expect(without[0].text).toBe("Hi :smile:");
+    expect(extractHeadings(src, { emoji: true })).toBe(withEmoji);
+  });
+
+  it("keeps a math-only heading apart from the same heading with math off", () => {
+    const src = "## Area $x$";
+    renderMarkdown(src, { math: true });
+    expect(extractHeadings(src, { math: false })[0].text).toBe("Area $x$");
+    expect(extractHeadings(src, { math: true })[0].text).toBe("Area");
+  });
+
+  it("returns equal headings once the document has left the cache", () => {
+    const src = "# Keep\n\n# Keep";
+    const first = renderMarkdown(src).headings;
+    for (let i = 0; i < 6; i++) renderMarkdown(`# Other ${i}`);
+    expect(extractHeadings(src)).toEqual(first);
   });
 });
 

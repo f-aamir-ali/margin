@@ -10,7 +10,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { attachSmoothCaret } from '../lib/caret';
 import { cmHighlight, cmTheme } from '../lib/cmTheme';
 import { configureMarkSerialisers, extraMarks } from '../lib/editorMarks';
-import { fromEditor, toEditor } from '../lib/editorText';
+import { fromEditor, splitFrontMatter, toEditor } from '../lib/editorText';
 import { enhance } from '../lib/enhance';
 import {
   assetUrl,
@@ -26,7 +26,6 @@ import { liveEditors, useApp, type Doc } from '../lib/store';
 import { toast } from '../lib/toast';
 import { useLongPage, useViewSync } from '../lib/viewSync';
 
-const FRONT_MATTER = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
 const SNAP_BLOCKS = 'h1, h2, h3, h4, h5, h6, blockquote, ul, ol, hr, .milkdown-code-block, .milkdown-table-block';
 
 /** Dims every block except the one holding the caret (the "focus paragraph" setting). */
@@ -100,8 +99,9 @@ export function Editor({ doc, active, onPreparing, onReady, onError }: {
     const original = docRef.current.content;
     const originalLf = original.replace(/\r\n|\r/g, '\n');
     const eol = docRef.current.eol;
-    const frontMatter = FRONT_MATTER.exec(originalLf)?.[0] ?? '';
-    const body = toEditor(originalLf.slice(frontMatter.length));
+    // The same front matter rule as Read, so both modes agree on where the document starts.
+    const { raw: frontMatter, body: rest } = splitFrontMatter(originalLf);
+    const body = toEditor(rest);
     let disposed = false;
     let baseline: ProseNode | null = null;
     let baselineMarkdown: string | undefined;
@@ -203,24 +203,43 @@ export function Editor({ doc, active, onPreparing, onReady, onError }: {
     crepe.editor.use(activeBlock).use(alertBlocks).use(extraMarks);
 
     // Delay serialisation until there is an actual edit, including the untouched baseline.
+    // Edits reach the store after a short pause in typing, and at least once a second while
+    // typing never pauses, so the draft on disk is never more than about three seconds behind.
     let unsent = false;
+    let unsentSince = 0;
+    let warned = false;
     let reportTimer: ReturnType<typeof setTimeout> | undefined;
     const flush = () => {
       clearTimeout(reportTimer);
       if (disposed || !unsent || baseline === null) return;
-      unsent = false;
       const app = useApp.getState();
-      if (!app.docs.some((d) => d.id === doc.id && d.rev === doc.rev)) return;
+      if (!app.docs.some((d) => d.id === doc.id && d.rev === doc.rev)) {
+        unsent = false;
+        return;
+      }
       const untouched = baseline;
-      const next = crepe.editor.action((ctx) => {
-        const current = ctx.get(editorViewCtx).state.doc;
-        if (current.eq(untouched)) return original;
-        const serialize = ctx.get(serializerCtx);
-        baselineMarkdown ??= serialize(untouched);
-        const markdown = serialize(current);
-        // The original bytes survive undo and changes that only affect editor presentation.
-        return markdown === baselineMarkdown ? original : (frontMatter + fromEditor(markdown)).replace(/\n/g, eol);
-      });
+      let next: string;
+      try {
+        next = crepe.editor.action((ctx) => {
+          const current = ctx.get(editorViewCtx).state.doc;
+          if (current.eq(untouched)) return original;
+          const serialize = ctx.get(serializerCtx);
+          baselineMarkdown ??= serialize(untouched);
+          const markdown = serialize(current);
+          // The original bytes survive undo and changes that only affect editor presentation.
+          return markdown === baselineMarkdown ? original : (frontMatter + fromEditor(markdown)).replace(/\n/g, eol);
+        });
+      } catch (err) {
+        // The edit stays marked unsent, so the next keystroke or flush tries again.
+        console.error('Could not turn the edit into markdown', err);
+        if (!warned) {
+          warned = true;
+          toast.error("Edit couldn't turn this change into Markdown", 'Undo it (Ctrl+Z), or switch to Source to keep typing safely.');
+        }
+        return;
+      }
+      unsent = false;
+      unsentSince = 0;
       app.setContent(doc.id, next, true);
     };
     const trackEdits = $prose(
@@ -230,9 +249,11 @@ export function Editor({ doc, active, onPreparing, onReady, onError }: {
           view: () => ({
             update(view, prev) {
               if (baseline === null || view.state.doc.eq(prev.doc)) return;
+              const now = Date.now();
+              if (!unsent) unsentSince = now;
               unsent = true;
               clearTimeout(reportTimer);
-              reportTimer = setTimeout(flush, 200);
+              reportTimer = setTimeout(flush, now - unsentSince >= 1000 ? 0 : 200);
             },
           }),
         }),

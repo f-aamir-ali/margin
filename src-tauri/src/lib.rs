@@ -18,6 +18,7 @@ use tauri_plugin_window_state::StateFlags;
 use watcher::{SelfWrites, Watcher};
 
 const MAIN_WINDOW: &str = "main";
+/// Tells the window that a second launch queued files (or a blank note) for it.
 const OPEN_FILES: &str = "open-files";
 /// The settings folder used before the app was renamed from MD Viewer to Margin.
 const OLD_IDENTIFIER: &str = "com.faamirali.mdviewer";
@@ -25,6 +26,21 @@ const OLD_IDENTIFIER: &str = "com.faamirali.mdviewer";
 /// Files given on the command line at startup, handed out once by `launch_files`.
 #[derive(Default)]
 struct LaunchFiles(Mutex<Vec<String>>);
+
+/// Requests from later launches (Explorer double-clicks, Win+R `note`), each a list of files
+/// (empty for a blank note). They wait here until the window collects them, so a launch that
+/// arrives while the window is still starting up is never lost.
+#[derive(Default)]
+struct PendingOpens(Mutex<Vec<Vec<String>>>);
+
+#[tauri::command]
+fn take_open_requests(pending: State<'_, PendingOpens>) -> Vec<Vec<String>> {
+    pending
+        .0
+        .lock()
+        .map(|mut queue| std::mem::take(&mut *queue))
+        .unwrap_or_default()
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,7 +129,10 @@ pub fn run() {
             // A second launch with no files (Win+R `note` while Margin is open) sends an empty
             // list, which the window answers with a fresh note.
             let files = files::file_paths_from_args(args.iter().skip(1), Path::new(&cwd));
-            let _ = app.emit(OPEN_FILES, files);
+            if let Ok(mut queue) = app.state::<PendingOpens>().0.lock() {
+                queue.push(files);
+            }
+            let _ = app.emit(OPEN_FILES, ());
             if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
                 let _ = window.unminimize();
                 let _ = window.show();
@@ -141,6 +160,7 @@ pub fn run() {
                 .map(|arg| arg.to_string_lossy().into_owned());
             let launch = files::file_paths_from_args(args, &cwd);
             app.manage(LaunchFiles(Mutex::new(launch)));
+            app.manage(PendingOpens::default());
 
             let writes = SelfWrites::default();
             app.manage(writes.clone());
@@ -152,6 +172,7 @@ pub fn run() {
             files::write_file,
             files::write_binary,
             files::list_dir,
+            files::list_files,
             files::file_meta,
             files::reveal_in_explorer,
             files::open_linked_file,
@@ -163,6 +184,7 @@ pub fn run() {
             drafts::draft_delete,
             drafts::draft_list,
             launch_files,
+            take_open_requests,
             app_info,
             set_window_theme,
             show_snap_layout,

@@ -73,29 +73,29 @@ describe('file operations while editing', () => {
     const id = useApp.getState().activeId!;
     app.setContent(id, 'before');
     const dialog = deferred<string>();
-    const write = deferred<{ mtimeMs: number }>();
+    const write = deferred<{ mtimeMs: number; version: string }>();
     vi.spyOn(platform, 'pickSavePath').mockReturnValue(dialog.promise);
-    const onDisk = vi.spyOn(platform, 'writeFile').mockReturnValueOnce(write.promise).mockResolvedValue({ mtimeMs: 2 });
+    const onDisk = vi.spyOn(platform, 'writeFile').mockReturnValueOnce(write.promise).mockResolvedValue({ mtimeMs: 2, version: '2' });
     const saveAs = app.saveAs(id);
     app.setContent(id, 'during dialog');
     dialog.resolve('copy.txt');
     await Promise.resolve();
     app.setContent(id, 'during write');
-    write.resolve({ mtimeMs: 1 });
+    write.resolve({ mtimeMs: 1, version: '1' });
     await expect(saveAs).resolves.toBe(true);
     expect(onDisk).toHaveBeenNthCalledWith(1, 'copy.txt', 'during dialog', { encoding: 'UTF-8', bom: false });
     const current = activeDoc(useApp.getState())!;
     expect(current).toMatchObject({ content: 'during write', saved: 'during dialog', path: 'copy.txt' });
     expect(isDirty(current)).toBe(true);
     await expect(app.save(id)).resolves.toBe(true);
-    expect(onDisk).toHaveBeenLastCalledWith('copy.txt', 'during write', expect.objectContaining({ encoding: 'UTF-8' }));
+    expect(onDisk).toHaveBeenLastCalledWith('copy.txt', 'during write', expect.objectContaining({ encoding: 'UTF-8' }), expect.objectContaining({ expected: '1' }));
   });
 
   it('refuses to reopen in another encoding when the live editor has unsaved input', async () => {
     const app = useApp.getState();
     const read = vi.spyOn(platform, 'readFile').mockResolvedValue({
       path: 'note.md', name: 'note.md', content: 'disk', mtimeMs: 1, size: 4,
-      readonly: false, binary: false, encoding: 'UTF-8', bom: false,
+      readonly: false, binary: false, encoding: 'UTF-8', bom: false, lossy: false, version: '4:1',
     });
     await app.openPaths(['note.md']);
     const id = useApp.getState().activeId!;
@@ -109,7 +109,7 @@ describe('file operations while editing', () => {
     const app = useApp.getState();
     const disk = {
       path: 'note.md', name: 'note.md', content: 'disk', mtimeMs: 1, size: 4,
-      readonly: false, binary: false, encoding: 'UTF-8', bom: false,
+      readonly: false, binary: false, encoding: 'UTF-8', bom: false, lossy: false, version: '4:1',
     };
     const read = vi.spyOn(platform, 'readFile').mockResolvedValueOnce(disk).mockResolvedValue({ ...disk, content: 'outside', mtimeMs: 2 });
     const write = vi.spyOn(platform, 'writeFile');

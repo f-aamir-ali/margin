@@ -145,13 +145,19 @@ export function slugify(text: string): string {
 
 /**
  * Headings with the same ids that `renderMarkdown` assigns, without rendering any HTML.
- * Pass the same options you pass to `renderMarkdown`: typographer and emoji change the slugs.
+ * Pass the same options you pass to `renderMarkdown`: breaks, typographer, emoji, math, html and
+ * localFiles all change the heading text or slugs. A source that was just rendered with the same
+ * options is answered from the heading cache.
  */
 export function extractHeadings(src: string, opts: RenderOptions = {}): Heading[] {
   const config = resolveConfig(opts);
+  const key = configKey(config);
+  const cached = cachedHeadings(src, key);
+  if (cached) return cached;
   const { body } = splitFrontMatter(normalizeSource(src));
   const env = createEnv();
   getParser(config).parse(body, env);
+  rememberHeadings(src, key, env.headings);
   return env.headings;
 }
 
@@ -163,6 +169,7 @@ export function renderMarkdown(src: string, opts: RenderOptions = {}): RenderRes
   const env = createEnv(opts);
   const tokens = md.parse(body, env);
   const html = md.renderer.render(tokens, md.options, env);
+  rememberHeadings(src, configKey(config), env.headings);
   return {
     html: restoreMermaidSources(getSanitizer().sanitize(html, SANITIZE_CONFIG), env.mermaidSources),
     headings: env.headings,
@@ -195,6 +202,7 @@ function createEnv(opts: RenderOptions = {}): MarkdownEnv {
 const MERMAID_PLACEHOLDER = /<div class="mermaid-block" data-mermaid-id="(\d+)"/g;
 
 function restoreMermaidSources(html: string, sources: string[]): string {
+  if (sources.length === 0) return html;
   return html.replace(MERMAID_PLACEHOLDER, (match, id: string) => {
     const source = sources[Number(id)];
     return source === undefined ? match : `<div class="mermaid-block" data-source="${escapeHtml(source)}"`;
@@ -208,10 +216,12 @@ function restoreMermaidSources(html: string, sources: string[]): string {
  * line looks like a `key:` pair, so a leading horizontal rule is left alone.
  */
 function splitFrontMatter(src: string): { body: string; frontMatter: string | null } {
-  const lines = src.split("\n");
-  if (lines.length < 2 || lines[0].trimEnd() !== "---") {
+  // Most documents have no front matter, so only the first line is checked before splitting the whole source.
+  const firstLineEnd = src.indexOf("\n");
+  if (firstLineEnd < 0 || src.slice(0, firstLineEnd).trimEnd() !== "---") {
     return { body: src, frontMatter: null };
   }
+  const lines = src.split("\n");
   const close = lines.findIndex((line, index) => index > 0 && /^(---|\.\.\.)\s*$/.test(line));
   if (close < 0) return { body: src, frontMatter: null };
 
@@ -244,15 +254,50 @@ function resolveConfig(opts: RenderOptions): ParserConfig {
 const parsers = new Map<string, Md>();
 
 function getParser(config: ParserConfig): Md {
-  const key = [config.breaks, config.linkify, config.typographer, config.emoji, config.math, config.html, config.localFiles]
-    .map((flag) => (flag ? "1" : "0"))
-    .join("");
+  const key = configKey(config);
   let md = parsers.get(key);
   if (!md) {
     md = createParser(config);
     parsers.set(key, md);
   }
   return md;
+}
+
+/** The parser-affecting options as a string. lineNumbers and resolveUrl do not change parsing, so they are left out. */
+function configKey(config: ParserConfig): string {
+  return [config.breaks, config.linkify, config.typographer, config.emoji, config.math, config.html, config.localFiles]
+    .map((flag) => (flag ? "1" : "0"))
+    .join("");
+}
+
+// ---------------------------------------------------------------------------
+// Heading cache
+// ---------------------------------------------------------------------------
+
+/**
+ * Headings from the last few parses, keyed by source and parser options. The reader, the outline
+ * and the palette all ask for the same document's headings, so they share one parse.
+ */
+interface HeadingCacheEntry {
+  src: string;
+  key: string;
+  headings: Heading[];
+}
+
+const HEADING_CACHE_SIZE = 4;
+const headingCache: HeadingCacheEntry[] = [];
+
+function cachedHeadings(src: string, key: string): Heading[] | undefined {
+  const index = headingCache.findIndex((entry) => entry.key === key && entry.src === src);
+  if (index < 0) return undefined;
+  const [entry] = headingCache.splice(index, 1);
+  headingCache.unshift(entry);
+  return entry.headings;
+}
+
+function rememberHeadings(src: string, key: string, headings: Heading[]): void {
+  headingCache.unshift({ src, key, headings });
+  if (headingCache.length > HEADING_CACHE_SIZE) headingCache.pop();
 }
 
 function createParser(config: ParserConfig): Md {
@@ -336,34 +381,34 @@ interface TaskMeta {
 
 function markTaskItems(state: StateCore): void {
   const { tokens } = state;
-  for (let i = 2; i < tokens.length; i++) {
-    const inline = tokens[i];
-    if (inline.type !== "inline" || tokens[i - 1].type !== "paragraph_open" || tokens[i - 2].type !== "list_item_open") {
+  // One forward pass. Lists still open at each token sit on a stack: a list open pushes it and a list
+  // close pops it, so the top is always the parent of the item being read. No backward search needed.
+  const openLists: Token[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.type === "bullet_list_open" || token.type === "ordered_list_open") {
+      openLists.push(token);
       continue;
     }
-    const match = TASK_MARKER.exec(inline.content);
+    if (token.type === "bullet_list_close" || token.type === "ordered_list_close") {
+      openLists.pop();
+      continue;
+    }
+    if (token.type !== "inline" || i < 2 || tokens[i - 1].type !== "paragraph_open" || tokens[i - 2].type !== "list_item_open") {
+      continue;
+    }
+    const match = TASK_MARKER.exec(token.content);
     if (!match) continue;
 
-    inline.content = inline.content.slice(match[0].length).trimStart();
-    inline.meta = { task: { checked: match[1] !== " ", line: inline.map?.[0] ?? 0 } };
+    token.content = token.content.slice(match[0].length).trimStart();
+    token.meta = { task: { checked: match[1] !== " ", line: token.map?.[0] ?? 0 } };
 
-    const item = tokens[i - 2];
-    item.attrJoin("class", "task-list-item");
-    const list = findParentList(tokens, i - 2);
+    tokens[i - 2].attrJoin("class", "task-list-item");
+    const list = openLists[openLists.length - 1];
     if (list && !(attr(list, "class") ?? "").includes("contains-task-list")) {
       list.attrJoin("class", "contains-task-list");
     }
   }
-}
-
-function findParentList(tokens: Token[], index: number): Token | undefined {
-  const parentLevel = tokens[index].level - 1;
-  for (let j = index - 1; j >= 0; j--) {
-    if (tokens[j].level === parentLevel) {
-      return tokens[j].type.endsWith("_list_open") ? tokens[j] : undefined;
-    }
-  }
-  return undefined;
 }
 
 function insertCheckboxes(state: StateCore): void {
@@ -380,6 +425,7 @@ function assignHeadingIds(state: StateCore): void {
   const env = state.env as MarkdownEnv;
   const { tokens } = state;
   const used = new Set<string>();
+  const nextSuffix = new Map<string, number>();
   const headings: Heading[] = [];
 
   for (let i = 0; i < tokens.length - 1; i++) {
@@ -387,7 +433,7 @@ function assignHeadingIds(state: StateCore): void {
     if (open.type !== "heading_open") continue;
     const inline = tokens[i + 1];
     const text = inline.type === "inline" ? plainText(inline.children ?? []) : "";
-    const id = uniqueSlug(text, used);
+    const id = uniqueSlug(text, used, nextSuffix);
     open.attrSet("id", id);
     headings.push({
       level: Number(open.tag.slice(1)) as Heading["level"],
@@ -413,14 +459,23 @@ function plainText(tokens: Token[]): string {
   return out.replace(/\s+/g, " ").trim();
 }
 
-/** Unique GitHub-style id: the second "Intro" becomes "intro-1", the third "intro-2". */
-function uniqueSlug(text: string, used: Set<string>): string {
+/**
+ * Unique GitHub-style id: the second "Intro" becomes "intro-1", the third "intro-2".
+ *
+ * `nextSuffix` holds, per base slug, the suffix index after the last one handed out. Ids are never
+ * removed from `used`, so every index below that stored value is still taken and the probe can start
+ * there. A literal heading such as "Intro-1" that claims a suffix early is still skipped by the probe.
+ */
+function uniqueSlug(text: string, used: Set<string>, nextSuffix: Map<string, number>): string {
   const base = slugify(text) || "section";
-  let candidate = base;
-  for (let n = 1; used.has(candidate); n++) {
+  let n = nextSuffix.get(base) ?? 0;
+  let candidate = n === 0 ? base : `${base}-${n}`;
+  while (used.has(candidate)) {
+    n++;
     candidate = `${base}-${n}`;
   }
   used.add(candidate);
+  nextSuffix.set(base, n + 1);
   return candidate;
 }
 
@@ -494,9 +549,11 @@ function assignBlockLines(state: StateCore): void {
   }
 
   // The footnote section has no source map of its own, so it takes the line of its first definition.
+  // Only a document with a footnote section needs the source split into lines.
   const footnotes = state.tokens.find((token) => token.type === "footnote_block_open");
+  if (!footnotes) return;
   const firstDefinition = state.src.split("\n").findIndex((line) => FOOTNOTE_DEFINITION.test(line));
-  if (footnotes && firstDefinition >= 0) {
+  if (firstDefinition >= 0) {
     footnotes.attrSet("data-line", String(firstDefinition));
   }
 }

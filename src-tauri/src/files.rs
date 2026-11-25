@@ -15,7 +15,7 @@ const MAX_READ_BYTES: u64 = 50 * 1024 * 1024;
 const MARKDOWN_EXTENSIONS: [&str; 6] = ["md", "markdown", "mdown", "mkd", "mdx", "mdwn"];
 const SKIPPED_FOLDER: &str = "node_modules";
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct FileData {
     path: String,
@@ -30,12 +30,18 @@ pub struct FileData {
     bom: bool,
     /// Opened despite looking binary: shown, but never saved over.
     binary: bool,
+    /// Some bytes weren't valid in `encoding` and were replaced: saving would change them.
+    lossy: bool,
+    /// Size and modification time of the bytes read. A save passes it back so a file changed by
+    /// another program in the meantime is never overwritten silently.
+    version: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct WriteResult {
     mtime_ms: f64,
+    version: String,
 }
 
 #[derive(Serialize)]
@@ -67,19 +73,25 @@ pub async fn read_file(
 }
 
 /// Writes `content` in `encoding` (default UTF-8), with a byte order mark when `bom` is set.
+/// With `expected`, the save is refused (`CONFLICT:`) when the file on disk is no longer the
+/// version the text was based on, unless `force` is set.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn write_file(
     path: String,
     content: String,
     encoding: Option<String>,
     bom: Option<bool>,
+    expected: Option<String>,
+    force: Option<bool>,
     writes: State<'_, SelfWrites>,
 ) -> Result<WriteResult, String> {
     let writes = writes.inner().clone();
     blocking(move || {
         let label = encoding.as_deref().unwrap_or("UTF-8");
         let bytes = encode_text(&content, label, bom.unwrap_or(false))?;
-        write_file_sync(&path, &bytes, &writes)
+        let expected = if force.unwrap_or(false) { None } else { expected };
+        write_file_sync(&path, &bytes, expected.as_deref(), &writes)
     })
     .await
 }
@@ -92,6 +104,13 @@ pub async fn write_binary(path: String, base64: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
     blocking(move || list_dir_sync(&path)).await
+}
+
+/// Every Markdown and text file under `path` (for the palette's file search), nearest first.
+/// Hidden entries and `node_modules` are skipped, and the walk stops at `limit` files.
+#[tauri::command]
+pub async fn list_files(path: String, limit: Option<usize>) -> Result<Vec<DirEntry>, String> {
+    blocking(move || list_files_sync(&path, limit.unwrap_or(5000).min(20000))).await
 }
 
 #[tauri::command]
@@ -187,12 +206,12 @@ fn is_linked_file_type(path: &Path) -> bool {
 fn read_file_sync(path: &str, encoding: Option<&str>, force: bool) -> Result<FileData, String> {
     let target = absolute_path(path)?;
     let name = file_name(&target);
-    let meta = fs::metadata(&target).map_err(|err| io_message("open", &target, &err))?;
+    let meta = fs::metadata(&target).map_err(|err| read_error(&target, &err))?;
     if meta.is_dir() {
         return Err(format!("{} is a folder, not a file.", target.display()));
     }
     check_readable_size(meta.len(), &name)?;
-    let bytes = fs::read(&target).map_err(|err| io_message("open", &target, &err))?;
+    let bytes = fs::read(&target).map_err(|err| read_error(&target, &err))?;
     let binary = looks_binary(&bytes);
     if binary && !force {
         // The frontend recognises this prefix and offers "Open anyway".
@@ -212,26 +231,89 @@ fn read_file_sync(path: &str, encoding: Option<&str>, force: bool) -> Result<Fil
         encoding: decoded.encoding,
         bom: decoded.bom,
         binary,
+        lossy: decoded.lossy,
+        version: version_of(&meta),
     })
 }
 
-fn write_file_sync(path: &str, content: &[u8], writes: &SelfWrites) -> Result<WriteResult, String> {
-    let target = absolute_path(path)?;
-    if fs::metadata(&target).is_ok_and(|meta| meta.permissions().readonly()) {
-        return Err(format!(
-            "{} is read-only, so it wasn't saved.",
-            file_name(&target)
-        ));
+/// A read failure, prefixed so the frontend can tell "gone" from "there but unreadable".
+fn read_error(path: &Path, err: &io::Error) -> String {
+    let message = io_message("open", path, err);
+    if err.kind() == io::ErrorKind::NotFound {
+        format!("NOTFOUND: {message}")
+    } else {
+        message
     }
+}
+
+/// Identifies one version of a file's bytes: its size and modification time in nanoseconds.
+pub(crate) fn version_of(meta: &fs::Metadata) -> String {
+    let nanos = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    format!("{}:{nanos}", meta.len())
+}
+
+fn write_file_sync(
+    path: &str,
+    content: &[u8],
+    expected: Option<&str>,
+    writes: &SelfWrites,
+) -> Result<WriteResult, String> {
+    // Saving through a symbolic link writes the file it points to and keeps the link.
+    let target = resolve_link(absolute_path(path)?);
+    if let Ok(meta) = fs::metadata(&target) {
+        if meta.permissions().readonly() {
+            return Err(format!(
+                "{} is read-only, so it wasn't saved.",
+                file_name(&target)
+            ));
+        }
+        if let Some(expected) = expected
+            && version_of(&meta) != expected
+        {
+            return Err(format!(
+                "CONFLICT: {} changed on disk after Margin last read or saved it.",
+                file_name(&target)
+            ));
+        }
+    }
+    // A file that is gone is written again: the frontend already shows it as missing.
     writes.record(&target);
     if let Err(err) = atomic_write(&target, content) {
         writes.forget(&target);
         return Err(err);
     }
     let meta = fs::metadata(&target).map_err(|err| io_message("check", &target, &err))?;
+    let version = version_of(&meta);
+    writes.written(&target, &version);
     Ok(WriteResult {
         mtime_ms: modified_ms(&meta),
+        version,
     })
+}
+
+/// Follows a symbolic link to the file it points at. Anything else is returned unchanged.
+fn resolve_link(path: PathBuf) -> PathBuf {
+    let is_link = fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink());
+    if !is_link {
+        return path;
+    }
+    path.canonicalize().map_or(path, strip_verbatim)
+}
+
+/// `canonicalize` returns `\\?\C:\...` on Windows; the rest of the app uses ordinary paths.
+fn strip_verbatim(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => path,
+    }
 }
 
 fn write_binary_sync(path: &str, encoded: &str) -> Result<(), String> {
@@ -283,6 +365,65 @@ fn list_dir_sync(path: &str) -> Result<Vec<DirEntry>, String> {
     Ok(entries)
 }
 
+const MAX_SEARCH_DEPTH: usize = 8;
+const TEXT_EXTENSIONS: &str = "txt text log ini cfg conf nfo json jsonc yaml yml toml env csv tsv \
+    xml html htm css scss js mjs cjs ts tsx jsx py java c h cpp hpp cs go rs rb php sh ps1 bat cmd \
+    sql lua kt swift dart srt properties";
+
+fn is_listed_text(path: &Path) -> bool {
+    let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+    is_markdown_path(path)
+        || TEXT_EXTENSIONS
+            .split_ascii_whitespace()
+            .any(|known| ext.eq_ignore_ascii_case(known))
+}
+
+fn list_files_sync(path: &str, limit: usize) -> Result<Vec<DirEntry>, String> {
+    let root = absolute_path(path)?;
+    if !root.is_dir() {
+        return Err(format!("{} isn't a folder.", root.display()));
+    }
+    let mut found = Vec::new();
+    // Breadth first, so files near the top of the folder are found before deep ones.
+    let mut queue = std::collections::VecDeque::from([(root, 0usize)]);
+    while let Some((folder, depth)) = queue.pop_front() {
+        let Ok(read) = fs::read_dir(&folder) else { continue };
+        let mut entries: Vec<fs::DirEntry> = read.filter_map(Result::ok).collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name == SKIPPED_FOLDER {
+                continue;
+            }
+            // Don't follow links out of the folder: a junction loop would never end.
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_symlink() {
+                continue;
+            }
+            let entry_path = entry.path();
+            if entry.metadata().is_ok_and(|meta| has_hidden_attribute(&meta)) {
+                continue;
+            }
+            if kind.is_dir() {
+                if depth < MAX_SEARCH_DEPTH {
+                    queue.push_back((entry_path, depth + 1));
+                }
+            } else if is_listed_text(&entry_path) {
+                found.push(DirEntry {
+                    is_markdown: is_markdown_path(&entry_path),
+                    path: path_string(&entry_path),
+                    name,
+                    is_dir: false,
+                });
+                if found.len() >= limit {
+                    return Ok(found);
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
 fn file_meta_sync(path: &str) -> Result<FileMeta, String> {
     let target = absolute_path(path)?;
     match fs::metadata(&target) {
@@ -302,7 +443,9 @@ fn file_meta_sync(path: &str) -> Result<FileMeta, String> {
     }
 }
 
-/// Writes to a temporary file in the same folder, then renames it over `target`.
+/// Writes to a temporary file in the same folder, then swaps it in for `target`.
+/// On Windows an existing file is replaced with `ReplaceFileW`, which keeps the original's
+/// attributes (hidden, archive), permissions, creation time and alternate data streams.
 pub(crate) fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
     let folder = target
         .parent()
@@ -314,9 +457,63 @@ pub(crate) fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
     temp.as_file()
         .sync_all()
         .map_err(|err| io_message("save", target, &err))?;
+    #[cfg(windows)]
+    let temp = match replace_existing(target, temp)? {
+        Some(temp) => temp,
+        None => return Ok(()),
+    };
     temp.persist(target)
         .map_err(|err| io_message("save", target, &err.error))?;
     Ok(())
+}
+
+/// Swaps `temp` in for an existing `target` with ReplaceFileW. Returns the temp file back when
+/// the target doesn't exist yet or Windows refused the replace, so the caller can rename instead.
+#[cfg(windows)]
+fn replace_existing(
+    target: &Path,
+    temp: tempfile::NamedTempFile,
+) -> Result<Option<tempfile::NamedTempFile>, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW};
+    use windows::core::PCWSTR;
+
+    if !target.is_file() {
+        return Ok(Some(temp));
+    }
+    let wide = |path: &Path| -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+    let replaced = wide(target);
+    let replacement = wide(temp.path());
+    // Windows can only move the temp file once it is closed.
+    let (file, path) = temp.into_parts();
+    drop(file);
+    // SAFETY: both strings are NUL-terminated UTF-16 buffers that outlive the call.
+    let result = unsafe {
+        ReplaceFileW(
+            PCWSTR(replaced.as_ptr()),
+            PCWSTR(replacement.as_ptr()),
+            PCWSTR::null(),
+            REPLACEFILE_IGNORE_MERGE_ERRORS,
+            None,
+            None,
+        )
+    };
+    if result.is_ok() {
+        // The temp file became the target, so there is nothing left to delete.
+        let _ = path.keep();
+        return Ok(None);
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|err| io_message("save", target, &err))?;
+    Ok(Some(tempfile::NamedTempFile::from_parts(file, path)))
 }
 
 /// Returns the absolute form of `path`, without touching the disk.
@@ -368,6 +565,8 @@ pub struct Decoded {
     pub text: String,
     pub encoding: String,
     pub bom: bool,
+    /// Malformed bytes were replaced with U+FFFD, so saving would not give the same bytes back.
+    pub lossy: bool,
 }
 
 /// NUL bytes in the first 8 KB mean binary, unless a UTF-16 byte order mark explains them.
@@ -382,11 +581,12 @@ fn looks_binary(bytes: &[u8]) -> bool {
 /// most likely legacy code page (Windows-1252 for most Western text). The BOM is removed.
 pub fn decode_text(bytes: &[u8]) -> Decoded {
     if let Some((encoding, bom_len)) = encoding_rs::Encoding::for_bom(bytes) {
-        let (text, _) = encoding.decode_without_bom_handling(&bytes[bom_len..]);
+        let (text, lossy) = encoding.decode_without_bom_handling(&bytes[bom_len..]);
         return Decoded {
             text: text.into_owned(),
             encoding: encoding.name().to_owned(),
             bom: true,
+            lossy,
         };
     }
     if let Ok(text) = std::str::from_utf8(bytes) {
@@ -394,16 +594,18 @@ pub fn decode_text(bytes: &[u8]) -> Decoded {
             text: text.to_owned(),
             encoding: "UTF-8".to_owned(),
             bom: false,
+            lossy: false,
         };
     }
     let mut detector = chardetng::EncodingDetector::new();
     detector.feed(bytes, true);
     let encoding = detector.guess(None, false);
-    let (text, _) = encoding.decode_without_bom_handling(bytes);
+    let (text, lossy) = encoding.decode_without_bom_handling(bytes);
     Decoded {
         text: text.into_owned(),
         encoding: encoding.name().to_owned(),
         bom: false,
+        lossy,
     }
 }
 
@@ -419,11 +621,12 @@ fn decode_as(bytes: &[u8], label: &str) -> Result<Decoded, String> {
         Some((found, len)) if found == encoding => len,
         _ => 0,
     };
-    let (text, _) = encoding.decode_without_bom_handling(&bytes[bom_len..]);
+    let (text, lossy) = encoding.decode_without_bom_handling(&bytes[bom_len..]);
     Ok(Decoded {
         text: text.into_owned(),
         encoding: encoding.name().to_owned(),
         bom: bom_len > 0,
+        lossy,
     })
 }
 
@@ -466,7 +669,7 @@ fn check_readable_size(len: u64, name: &str) -> Result<(), String> {
     }
     let megabytes = len as f64 / (1024.0 * 1024.0);
     Err(format!(
-        "{name} is {megabytes:.1} MB. Margin opens files up to 50 MB."
+        "TOOBIG: {name} is {megabytes:.1} MB. Margin opens files up to 50 MB."
     ))
 }
 
@@ -533,7 +736,68 @@ mod tests {
             text: text.to_owned(),
             encoding: encoding.to_owned(),
             bom,
+            lossy: false,
         }
+    }
+
+    #[test]
+    fn malformed_bytes_are_reported_as_lossy() {
+        // A UTF-8 byte order mark followed by a byte that can't start a UTF-8 sequence.
+        let d = decode_text(&[0xEF, 0xBB, 0xBF, b'a', 0xFF, b'b']);
+        assert!(d.lossy);
+        assert!(!decode_text(b"plain").lossy);
+        assert!(decode_as(&[b'a', 0xC3], "UTF-8").expect("decode").lossy);
+    }
+
+    #[test]
+    fn a_save_is_refused_when_the_disk_version_changed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("note.md");
+        fs::write(&target, "first").expect("write");
+        let opened = version_of(&fs::metadata(&target).expect("meta"));
+        let writes = SelfWrites::default();
+        let path = target.to_string_lossy().into_owned();
+
+        // Another program changes the file after Margin read it.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&target, "changed elsewhere!").expect("write");
+        let err = write_file_sync(&path, b"mine", Some(&opened), &writes).expect_err("must refuse");
+        assert!(err.starts_with("CONFLICT:"));
+        assert_eq!(fs::read_to_string(&target).expect("read"), "changed elsewhere!");
+
+        // With the current version (or no version) the save goes through.
+        let current = version_of(&fs::metadata(&target).expect("meta"));
+        let saved = write_file_sync(&path, b"mine", Some(&current), &writes).expect("save");
+        assert_eq!(fs::read_to_string(&target).expect("read"), "mine");
+        assert_eq!(saved.version, version_of(&fs::metadata(&target).expect("meta")));
+    }
+
+    #[test]
+    fn missing_files_report_not_found_and_large_files_too_big() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let gone = dir.path().join("gone.md");
+        let err = read_file_sync(&gone.to_string_lossy(), None, false).err().expect("missing");
+        assert!(err.starts_with("NOTFOUND:"));
+        assert!(check_readable_size(MAX_READ_BYTES + 1, "a.md").expect_err("big").starts_with("TOOBIG:"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn saving_keeps_the_hidden_attribute() {
+        use std::os::windows::fs::MetadataExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("hidden.txt");
+        fs::write(&target, "one").expect("write");
+        let status = std::process::Command::new("attrib")
+            .arg("+h")
+            .arg(&target)
+            .status()
+            .expect("attrib");
+        assert!(status.success());
+        atomic_write(&target, b"two").expect("save");
+        assert_eq!(fs::read_to_string(&target).expect("read"), "two");
+        let attrs = fs::metadata(&target).expect("meta").file_attributes();
+        assert!(attrs & 0x2 != 0, "the hidden attribute was lost");
     }
 
     #[test]

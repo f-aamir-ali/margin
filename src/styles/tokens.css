@@ -44,6 +44,8 @@
   --accent-ink: #06101f;
   --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
   --accent-line: color-mix(in srgb, var(--accent) 45%, transparent);
+  /* Accent as text on popovers. Light themes deepen it (see the light group) so it reads at 4.5:1. */
+  --accent-text: var(--accent);
 }
 
 /* ---------- Carbon: the default. Near-black, bencho-style. ---------- */
@@ -60,7 +62,9 @@
   --line-2: rgba(255, 255, 255, 0.11);
   --text: #f4f4f4;
   --text-2: #a3a3a3;
-  --text-3: #6f6f6f;
+  /* text-3 and text-4 are placeholder/status colours: text-3 is the faintest colour allowed for text (4.5:1 on tile-2).
+     text-4 is decorative only (icons), so it stays low. */
+  --text-3: #828282;
   --text-4: #4a4a4a;
   --doc-bg: var(--tile);
   --doc-text: #e6e6e6;
@@ -78,8 +82,10 @@
   --danger: #ff5c5c;
   --ok: #3ecf8e;
   --warn: #f5a524;
+  /* Status text in warning colour. Same as --warn on dark themes; deeper on light ones (see each light theme). */
+  --warn-text: var(--warn);
 
-  --syn-comment: #6b6b6b;
+  --syn-comment: #7b7b7b;
   --syn-keyword: #c792ea;
   --syn-string: #9ece6a;
   --syn-number: #f5a97f;
@@ -109,12 +115,13 @@
   --line-2: rgba(255, 255, 255, 0.12);
   --text: #f1f2f4;
   --text-2: #a9adb6;
-  --text-3: #767a84;
+  --text-3: #888d97;
   --text-4: #555963;
   --doc-text: #dfe1e6;
   --doc-heading: #f7f8fa;
   --doc-muted: #9aa0ab;
   --code-bg: #18191b;
+  --syn-comment: #818181;
 }
 
 :root[data-theme='midnight'] {
@@ -129,7 +136,7 @@
   --line-2: rgba(150, 180, 255, 0.15);
   --text: #eef2ff;
   --text-2: #9aa7c7;
-  --text-3: #66739a;
+  --text-3: #7481a9;
   --text-4: #445072;
   --doc-text: #d7def2;
   --doc-heading: #f4f7ff;
@@ -152,7 +159,7 @@
   --line-2: rgba(255, 236, 214, 0.12);
   --text: #f1e8dc;
   --text-2: #b3a796;
-  --text-3: #7f7466;
+  --text-3: #8d8273;
   --text-4: #585046;
   --doc-bg: var(--tile);
   --doc-text: #e8dfd1;
@@ -163,7 +170,7 @@
   --mark-bg: rgba(245, 165, 36, 0.26);
   --mark-text: #fcd9a0;
 
-  --syn-comment: #7a6e60;
+  --syn-comment: #86796b;
   --syn-keyword: #e09a6b;
   --syn-string: #b8c47a;
   --syn-number: #e8b45c;
@@ -207,6 +214,7 @@
   --alert-important: #7c3aed;
   --alert-warning: #b76e00;
   --alert-caution: #d92d20;
+  --accent-text: color-mix(in srgb, var(--accent) 80%, #000);
 }
 
 :root[data-theme='paper'] {
@@ -220,8 +228,18 @@
   --line-2: rgba(0, 0, 0, 0.13);
   --text: #141414;
   --text-2: #5c5c5c;
-  --text-3: #8c8c8c;
+  --text-3: #6b6b6b;
   --text-4: #b5b5b5;
+  /* 4.5:1 status, syntax and callout colours on this theme's surfaces (the group above keeps the originals) */
+  --danger: #d82c1f;
+  --ok: #00824b;
+  --warn-text: #a05900;
+  --syn-comment: #6c717a;
+  --syn-punct: #5f646c;
+  --alert-note: #1567e2;
+  --alert-tip: #007e47;
+  --alert-warning: #a45c00;
+  --alert-caution: #d32519;
   --doc-bg: #ffffff;
   --doc-text: #262626;
   --doc-heading: #0f0f0f;
@@ -243,8 +261,21 @@
   --line-2: rgba(60, 45, 25, 0.14);
   --text: #1f1b16;
   --text-2: #5f574c;
-  --text-3: #8f867a;
+  --text-3: #6e655a;
   --text-4: #bdb5a9;
+  --danger: #d4261a;
+  --ok: #007d46;
+  --warn-text: #9b5400;
+  --syn-comment: #686d76;
+  --syn-string: #2e7c31;
+  --syn-number: #b15102;
+  --syn-type: #017983;
+  --syn-attr: #956300;
+  --syn-punct: #5b6068;
+  --alert-note: #1063df;
+  --alert-tip: #007a45;
+  --alert-warning: #a05900;
+  --alert-caution: #ce1f13;
   --doc-bg: #fbf9f5;
   --doc-text: #2a251f;
   --doc-heading: #15120e;
@@ -264,9 +295,25 @@
   --line: rgba(80, 55, 20, 0.1);
   --line-2: rgba(80, 55, 20, 0.18);
   --text: #2e2416;
-  --text-2: #6b5a3f;
-  --text-3: #96846a;
+  --text-2: #6a593e;
+  --text-3: #705f46;
   --text-4: #b9a98f;
+  --danger: #cc1b11;
+  --ok: #00753f;
+  --warn-text: #964f00;
+  --syn-comment: #61666f;
+  --syn-keyword: #883bd5;
+  --syn-string: #257429;
+  --syn-number: #a94900;
+  --syn-type: #00717b;
+  --syn-tag: #c0235b;
+  --syn-attr: #8d5b00;
+  --syn-punct: #555961;
+  --alert-note: #035cd6;
+  --alert-tip: #00733e;
+  --alert-important: #7a36ea;
+  --alert-warning: #995200;
+  --alert-caution: #c60f05;
   --doc-bg: #f6eedd;
   --doc-text: #3a2e1c;
   --doc-heading: #241a0c;
@@ -287,8 +334,21 @@
   --line-2: rgba(20, 40, 70, 0.15);
   --text: #131a24;
   --text-2: #51606f;
-  --text-3: #8391a1;
+  --text-3: #5a6776;
   --text-4: #aeb9c6;
+  --danger: #d32519;
+  --ok: #007c45;
+  --warn-text: #9a5400;
+  --syn-comment: #666b73;
+  --syn-string: #2c7a2f;
+  --syn-number: #af4f00;
+  --syn-type: #007781;
+  --syn-attr: #936100;
+  --syn-punct: #595e66;
+  --alert-note: #0e62dd;
+  --alert-tip: #007942;
+  --alert-warning: #9e5700;
+  --alert-caution: #cc1c11;
   --doc-bg: #f5f7fa;
   --doc-text: #232c38;
   --doc-heading: #0d131b;

@@ -92,9 +92,10 @@
   scale: 0.985;
 }
 
+/* Keyboard focus only (not mouse clicks). Accent ring, so it reads on every surface. */
 :focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--tile), 0 0 0 4px color-mix(in srgb, var(--text) 38%, transparent);
+  box-shadow: 0 0 0 2px var(--tile), 0 0 0 4px var(--accent);
 }
 
 button:disabled {
@@ -302,7 +303,7 @@ button:disabled {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4), 0 0 0 9px var(--accent-soft);
 }
 .slider-track input:focus-visible ~ .slider-thumb {
-  box-shadow: 0 0 0 2px var(--tile), 0 0 0 4px color-mix(in srgb, var(--text) 38%, transparent);
+  box-shadow: 0 0 0 2px var(--tile), 0 0 0 4px var(--accent);
 }
 .slider-value {
   width: 58px;
@@ -376,6 +377,10 @@ button:disabled {
 .menu-hint {
   color: var(--text-3);
   font-size: 12px;
+}
+/* Highlighted rows sit on raised-2, where faint text would drop below 4.5:1: step up to text-2. */
+.menu-item[data-cursor] .menu-hint {
+  color: var(--text-2);
 }
 .menu-check {
   color: var(--accent);
@@ -545,6 +550,16 @@ button:disabled {
 .tab[data-active='true'] {
   color: var(--text);
   background: none;
+}
+/* Tabs are not focusable themselves: keyboard focus lands on the close button, and the tab shows the ring. */
+.tab:has(:focus-visible),
+.tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: var(--r-sm);
+}
+.tab-close:focus-visible {
+  box-shadow: inset 0 0 0 1.5px var(--accent);
 }
 .tab-bg {
   position: absolute;
@@ -798,7 +813,7 @@ button:disabled {
 }
 .files-note {
   padding: 4px 8px;
-  color: var(--text-4);
+  color: var(--text-3);
   font-size: 12px;
 }
 
@@ -820,6 +835,10 @@ button:disabled {
   gap: 1px;
   padding: 6px 4px 6px 10px;
   text-align: left;
+}
+/* The row clips its children, so the focus ring is drawn inside the button. */
+.recent-main:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 .recent-name {
   color: var(--text);
@@ -1003,7 +1022,7 @@ button:disabled {
 .doc-empty-hint {
   margin-top: 8px !important;
   font-size: 12.5px;
-  color: var(--text-4);
+  color: var(--text-3);
 }
 
 .progress {
@@ -1112,8 +1131,8 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   padding: var(--gap) 8px 0;
-  color: var(--text-3);
-  font-size: 12px;
+  color: var(--text-2);
+  font-size: 12.5px;
   font-variant-numeric: tabular-nums;
   box-sizing: content-box;
   height: 22px;
@@ -1137,7 +1156,7 @@ button:disabled {
   white-space: nowrap;
 }
 .status-dim {
-  color: var(--text-4);
+  color: var(--text-3);
 }
 .status-num {
   min-width: 42px;
@@ -1189,7 +1208,7 @@ button:disabled {
   color: var(--text-2);
 }
 .status-save[data-state='conflict'] {
-  color: var(--warn);
+  color: var(--warn-text);
 }
 .status-dot {
   width: 6px;
@@ -1308,7 +1327,7 @@ button:disabled {
   white-space: nowrap;
 }
 .palette-title b {
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 .palette-hint {
@@ -1319,12 +1338,19 @@ button:disabled {
   white-space: nowrap;
   direction: rtl;
   text-align: left;
-  color: var(--text-4);
+  color: var(--text-3);
   font-size: 12px;
 }
 .palette-tag {
-  color: var(--text-4);
+  color: var(--text-3);
   font-size: 12px;
+}
+/* Highlighted row (raised-2): secondary text steps up to text-2, the match goes back to plain text colour. */
+.palette-row[data-cursor='true'] :is(.palette-hint, .palette-tag, .palette-enter, .palette-icon) {
+  color: var(--text-2);
+}
+.palette-row[data-cursor='true'] .palette-title b {
+  color: var(--text);
 }
 .palette-row .keys,
 .palette-enter {
@@ -1607,7 +1633,7 @@ button:disabled {
   white-space: nowrap;
   direction: rtl;
   text-align: right;
-  color: var(--text-4);
+  color: var(--text-3);
   font-size: 12px;
 }
 .welcome-hint {
@@ -1784,7 +1810,7 @@ section:first-child > .settings-group:first-child,
   padding: 1px 7px;
   border-radius: 999px;
   background: var(--raised-2);
-  color: var(--text-3);
+  color: var(--text-2);
   font-size: 11px;
 }
 .setting-hint {
@@ -1984,5 +2010,145 @@ section:first-child > .settings-group:first-child,
 @media (max-width: 720px) {
   .workspace > .sidebar {
     display: none;
+  }
+}
+
+/* ---------- reduced motion (the OS setting; the in-app setting is in tokens.css) ---------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* The caret keeps blinking: it is text-cursor feedback, not motion. */
+  .smooth-caret[data-visible='true'][data-blink='true'] {
+    animation-duration: 1.15s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
+
+/* ---------- forced colours (Windows high contrast) ----------
+   The system drops backgrounds and box-shadows, so state is drawn with outlines and system colours
+   (keywords such as Highlight are kept). Anything that only had a shadow or a tint gets one here. */
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+    box-shadow: none;
+  }
+  .tab:has(:focus-visible),
+  .tab:focus-visible,
+  .tab-close:focus-visible,
+  .recent-main:focus-visible {
+    outline-color: Highlight;
+  }
+  .tab-close:focus-visible,
+  .recent-main:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  /* selected and highlighted items */
+  .tab[data-active='true'],
+  .outline-item[data-active='true'],
+  .file-row[data-active='true'],
+  .settings-nav-item[data-on],
+  .menu-item[data-cursor],
+  .palette-row[data-cursor='true'],
+  .theme-card[data-on],
+  .accent-dot[data-on] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+  .icon-btn[data-active],
+  .segmented-thumb,
+  .select-trigger,
+  .btn-soft,
+  .btn-solid,
+  .toast-action {
+    outline: 1px solid ButtonText;
+    outline-offset: -1px;
+  }
+  .tab-dot,
+  .status-dot,
+  .outline-bar,
+  .progress-fill,
+  .sidebar-resize::after,
+  .slider-fill {
+    background: Highlight;
+  }
+
+  /* surfaces that were separated from the page by a shadow */
+  .tile,
+  .popover,
+  .menu,
+  .select-menu,
+  .tooltip,
+  .toast {
+    outline: 1px solid ButtonText;
+    outline-offset: -1px;
+  }
+
+  /* toggles and sliders */
+  .switch {
+    outline: 1px solid ButtonText;
+    outline-offset: -1px;
+  }
+  .switch[data-on] {
+    background: Highlight;
+    outline-color: Highlight;
+  }
+  .switch-knob {
+    background: ButtonText;
+  }
+  .switch[data-on] .switch-knob {
+    background: HighlightText;
+  }
+  .slider-track::before {
+    background: ButtonText;
+  }
+  .slider-thumb {
+    background: Canvas;
+    outline: 2px solid ButtonText;
+  }
+
+  /* text fields: the focus ring is an outline too */
+  .text-input:focus,
+  .find-field:focus-within,
+  .settings-search:focus-within,
+  .css-input:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -1px;
+  }
+
+  /* caret and task boxes (Reading and Editing) */
+  .smooth-caret {
+    background: CanvasText;
+  }
+  .prose input.task-checkbox,
+  .prose .task-list-item > input[type='checkbox'],
+  .prose .task-list-item > p > input[type='checkbox'] {
+    box-shadow: none;
+    border: 1.5px solid ButtonText;
+    background: Canvas;
+  }
+  .prose input.task-checkbox:checked {
+    background: Highlight;
+    border-color: Highlight;
+  }
+  .prose input.task-checkbox::after {
+    background: CanvasText;
+  }
+  .prose input.task-checkbox:checked::after {
+    background: HighlightText;
+  }
+  .prose.editor .milkdown .milkdown-list-item-block li .label-wrapper svg {
+    fill: CanvasText;
+  }
+  .prose.editor .milkdown .milkdown-list-item-block li .label-wrapper .checked svg {
+    fill: Highlight;
   }
 }

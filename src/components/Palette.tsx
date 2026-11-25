@@ -3,6 +3,8 @@ import { CornerDownLeft, FileText, Hash, Search } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { COMMANDS } from '../lib/commands';
 import { extractHeadings } from '../lib/markdown';
+import { isTauri } from '../lib/platform';
+import { useSettings } from '../lib/settings';
 import { activeDoc, displayName, useApp } from '../lib/store';
 import { useUi } from '../lib/ui';
 import { Keys, SPRING } from './ui/controls';
@@ -67,19 +69,43 @@ export function Palette() {
   const doc = useApp(activeDoc);
   const recents = useApp((s) => s.recents);
   const docs = useApp((s) => s.docs);
+  const settings = useSettings((st) => st.settings);
+  const content = doc?.content;
+  const lineMode = query.startsWith(':');
+  const headingMode = query.startsWith('#');
+
+  // Counting lines splits the whole document, so it runs once per document, not once per keystroke.
+  const lineTotal = useMemo(
+    () => (lineMode && content !== undefined ? content.split(/\r\n|\r|\n/).length : 0),
+    [lineMode, content],
+  );
+  // Parsed once per document, and only while heading search is open. Same options as Reader, so the cache matches.
+  const headings = useMemo(
+    () =>
+      headingMode && content !== undefined
+        ? extractHeadings(content, {
+            breaks: settings.breaks,
+            linkify: settings.linkify,
+            typographer: settings.typographer,
+            emoji: settings.emoji,
+            math: settings.math,
+            html: settings.rawHtml,
+            localFiles: isTauri,
+          })
+        : [],
+    [headingMode, content, settings.breaks, settings.linkify, settings.typographer, settings.emoji, settings.math, settings.rawHtml],
+  );
 
   const rows = useMemo<Row[]>(() => {
     const out: Row[] = [];
-    const lineMode = query.startsWith(':');
     if (lineMode) {
       if (!doc) return [];
-      const total = doc.content.split(/\r\n|\r|\n/).length;
       const n = parseInt(query.slice(1), 10);
-      const line = Number.isFinite(n) ? Math.min(Math.max(n, 1), total) : null;
+      const line = Number.isFinite(n) ? Math.min(Math.max(n, 1), lineTotal) : null;
       return [
         {
           key: 'goto-line',
-          title: line ? `Go to line ${line}` : `Type a line number (1–${total})`,
+          title: line ? `Go to line ${line}` : `Type a line number (1–${lineTotal})`,
           group: 'Go to line',
           icon: <Hash size={14} />,
           run: () => (line ? useUi.getState().jumpTo({ line: line - 1 }) : undefined),
@@ -88,12 +114,11 @@ export function Palette() {
         },
       ];
     }
-    const headingMode = query.startsWith('#');
     const q = (headingMode ? query.slice(1) : query).trim();
 
     if (headingMode) {
       if (!doc) return [];
-      extractHeadings(doc.content).forEach((h, i) => {
+      headings.forEach((h, i) => {
         const m = fuzzy(q, h.text);
         if (m) {
           out.push({
@@ -134,7 +159,7 @@ export function Palette() {
     }
     if (q) out.sort((a, b) => b.score - a.score);
     return out.slice(0, 60);
-  }, [query, doc, recents, docs]);
+  }, [query, doc, recents, docs, lineMode, lineTotal, headingMode, headings]);
 
   useEffect(() => setCursor(0), [query]);
   useEffect(() => {

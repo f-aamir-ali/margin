@@ -58,43 +58,109 @@ export function toEditor(md: string): string {
   return out.join('\n');
 }
 
+const ALERT = /^((?:[ \t]*>[ \t]?)+)\\\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\\?\]/i;
+const TOC = /^\\\[(\\\[)?toc\\?\](\\\])?[ \t]*$/i;
+
 /**
- * The editor writes an empty paragraph (an extra Enter) as a lone `<br />` block.
- * Markdown has no empty paragraphs, so those would just litter the file: leave them out.
+ * Tidies the editor's markdown on its way to the file. Works line by line and never touches
+ * the inside of a fenced code block, where every character is the user's own text.
+ *  - The editor writes an empty paragraph (an extra Enter) as a lone `<br />` block. Markdown has
+ *    no empty paragraphs, so those would just litter the file: leave them out.
+ *  - The serialiser escapes square brackets it does not understand. Undo that for the two
+ *    bracket constructs that must stay literal to keep working: `[!NOTE]` callouts and `[toc]`.
  */
-function dropEmptyParagraphs(md: string): string {
-  if (!md.includes('<br />')) return md;
+export function fromEditor(md: string): string {
   const lines = md.split('\n');
   const out: string[] = [];
   let fence: string | null = null;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    let line = lines[i];
     const f = FENCE.exec(line);
     if (f) {
       if (!fence) fence = f[1];
       else if (f[1][0] === fence[0] && f[1].length >= fence.length && line.trim() === f[1]) fence = null;
+      out.push(line);
+      continue;
     }
-    const alone = !fence && line === '<br />' && (out.length === 0 || out[out.length - 1] === '') && (lines[i + 1] === undefined || lines[i + 1] === '');
-    if (alone) {
+    if (fence) {
+      out.push(line);
+      continue;
+    }
+    if (line === '<br />' && (out.length === 0 || out[out.length - 1] === '') && (lines[i + 1] === undefined || lines[i + 1] === '')) {
       if (lines[i + 1] === '') i++; // also swallow the blank line that followed it
       continue;
     }
+    line = line
+      .replace(ALERT, (_m, prefix: string, kind: string) => `${prefix}[!${kind}]`)
+      .replace(TOC, (_m, open?: string) => (open ? '[[toc]]' : '[toc]'));
     out.push(line);
   }
   return out.join('\n');
 }
 
-const ALERT =/^((?:[ \t]*>[ \t]?)+)\\\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\\?\]/gim;
-const TOC = /^\\\[(\\\[)?toc\\?\](\\\])?[ \t]*$/gim;
+/**
+ * YAML front matter at the top of a document, by the same rule Read uses: a `---` first line,
+ * a closing `---` or `...` line, and a first non-blank line that looks like `key:`. A leading
+ * horizontal rule is left alone. `raw` includes both delimiter lines and the line break after.
+ */
+export function splitFrontMatter(text: string): { raw: string; body: string } {
+  const none = { raw: '', body: text };
+  const first = /^---[ \t]*\r?\n/.exec(text);
+  if (!first) return none;
+  let pos = first[0].length;
+  let firstContent: string | undefined;
+  while (pos <= text.length) {
+    const nl = text.indexOf('\n', pos);
+    const end = nl < 0 ? text.length : nl + 1;
+    const line = text.slice(pos, nl < 0 ? text.length : nl).replace(/\r$/, '');
+    if (/^(---|\.\.\.)\s*$/.test(line)) {
+      if (firstContent !== undefined && !/^[\w"'-][\w "'.-]*:(\s|$)/.test(firstContent)) return none;
+      return { raw: text.slice(0, end), body: text.slice(end) };
+    }
+    if (firstContent === undefined && line.trim() !== '') firstContent = line;
+    if (nl < 0) break;
+    pos = end;
+  }
+  return none;
+}
+
+const DATA_IMAGE = /(!\[[^\]\n]*\]\()data:image\/(png|jpe?g|gif|webp|bmp|avif|svg\+xml);base64,([A-Za-z0-9+/=\s]+)((?:\s+"[^"\n]*")?\))/g;
 
 /**
- * The editor's serialiser escapes square brackets it does not understand.
- * Undo that for the two bracket constructs that must stay literal to keep working.
+ * Pasted images in a note that had no file yet are kept inline as `data:` URLs. Once the note is
+ * saved somewhere they become files: this returns the text with relative links and the images
+ * to write (paths relative to the note, under `folder` when one is set). Code blocks are left alone.
  */
-export function fromEditor(md: string): string {
-  return dropEmptyParagraphs(md)
-    .replace(ALERT, (_m, prefix: string, kind: string) => `${prefix}[!${kind}]`)
-    .replace(TOC, (_m, open?: string) => (open ? '[[toc]]' : '[toc]'));
+export function extractDataImages(md: string, folder = ''): { text: string; images: { path: string; bytes: Uint8Array }[] } {
+  const images: { path: string; bytes: Uint8Array }[] = [];
+  const dir = folder.replace(/[\\/]+$/, '').replace(/\\/g, '/');
+  const lines = md.split('\n');
+  let fence: string | null = null;
+  const out = lines.map((line) => {
+    const f = FENCE.exec(line);
+    if (f) {
+      if (!fence) fence = f[1];
+      else if (f[1][0] === fence[0] && f[1].length >= fence.length && line.trim() === f[1]) fence = null;
+      return line;
+    }
+    if (fence || !line.includes('](data:image/')) return line;
+    return line.replace(DATA_IMAGE, (whole, open: string, type: string, data: string, close: string) => {
+      let bytes: Uint8Array;
+      try {
+        const bin = atob(data.replace(/\s+/g, ''));
+        bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      } catch {
+        return whole;
+      }
+      const ext = type === 'jpeg' ? 'jpg' : type === 'svg+xml' ? 'svg' : type;
+      const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+      const path = `${dir ? `${dir}/` : ''}image-${id}.${ext}`;
+      images.push({ path, bytes });
+      return `${open}${path.includes(' ') ? `<${path}>` : path}${close}`;
+    });
+  });
+  return { text: out.join('\n'), images };
 }
 
 const DASH_UNDERLINE = /^ {0,3}-{2,}[ \t]*$/;

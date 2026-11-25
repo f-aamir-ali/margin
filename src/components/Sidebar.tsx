@@ -3,7 +3,8 @@ import { ChevronRight, Clock, FileText, Folder, FolderOpen, ListTree, RefreshCw,
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { runCommand } from '../lib/commands';
 import { extractHeadings } from '../lib/markdown';
-import { baseName, dirName, isProseName, isTextPath, listDir, type DirEntry } from '../lib/platform';
+import { baseName, dirName, isProseName, isTextPath, isTauri, listDir, type DirEntry } from '../lib/platform';
+import { useSettings } from '../lib/settings';
 import { activeDoc, useApp, type SidebarTab } from '../lib/store';
 import { useUi } from '../lib/ui';
 import { useView } from '../lib/viewSync';
@@ -81,9 +82,23 @@ export function Sidebar() {
 
 function Outline() {
   const doc = useApp(activeDoc);
+  const settings = useSettings((st) => st.settings);
   // Plain text has no headings, even if a line starts with "#".
   const content = useDeferredValue(doc?.kind === 'markdown' ? doc.content : '');
-  const headings = useMemo(() => extractHeadings(content), [content]);
+  // The same parse options as Reader, so these headings are answered from the cache Reader fills.
+  const headings = useMemo(
+    () =>
+      extractHeadings(content, {
+        breaks: settings.breaks,
+        linkify: settings.linkify,
+        typographer: settings.typographer,
+        emoji: settings.emoji,
+        math: settings.math,
+        html: settings.rawHtml,
+        localFiles: isTauri,
+      }),
+    [content, settings.breaks, settings.linkify, settings.typographer, settings.emoji, settings.math, settings.rawHtml],
+  );
   const active = useView((s) => s.activeHeading);
   const listRef = useRef<HTMLDivElement>(null);
   const minLevel = useMemo(() => headings.reduce((m, h) => Math.min(m, h.level), 6), [headings]);

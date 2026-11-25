@@ -13,6 +13,17 @@ export interface FileData {
   encoding: string;
   bom: boolean;
   binary: boolean;
+  /** The file mixed CRLF, LF and CR line endings; they were unified to the most common one. */
+  mixedEol?: boolean;
+  /** Some bytes weren't valid in `encoding` and were replaced: saving would change them. */
+  lossy: boolean;
+  /** Identifies the bytes read (size and modification time); a save hands it back to detect changes made elsewhere. */
+  version: string;
+}
+
+export interface WriteResult {
+  mtimeMs: number;
+  version: string;
 }
 
 export interface FileEncoding {
@@ -88,6 +99,25 @@ export function detectEol(text: string, fallback: Eol = '\n'): Eol {
 }
 
 type Unlisten = () => void;
+
+/* ---------- errors from the desktop side ---------- */
+
+/** Rust prefixes the errors the UI has to tell apart: `NOTFOUND:`, `TOOBIG:`, `CONFLICT:`, `BINARY:`, `UNMAPPABLE:`. */
+export type ErrorKind = 'notfound' | 'toobig' | 'conflict' | 'binary' | 'unmappable' | 'other';
+
+export function errorText(err: unknown): string {
+  return String(err instanceof Error ? err.message : err);
+}
+
+export function errorKind(err: unknown): ErrorKind {
+  const m = /^(NOTFOUND|TOOBIG|CONFLICT|BINARY|UNMAPPABLE):/.exec(errorText(err));
+  return m ? (m[1].toLowerCase() as ErrorKind) : 'other';
+}
+
+/** The error without its machine prefix, for showing to the user. */
+export function errorMessage(err: unknown): string {
+  return errorText(err).replace(/^(NOTFOUND|TOOBIG|CONFLICT|BINARY|UNMAPPABLE):\s*/, '');
+}
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke: tauriInvoke } = await import('@tauri-apps/api/core');
@@ -195,6 +225,7 @@ export function localReferencePath(url: string, folder: string): string | null {
 /* ---------- browser fallback state ---------- */
 
 const webFiles = new Map<string, { content: string; mtimeMs: number }>();
+const webVersion = (f: { content: string; mtimeMs: number }) => `${f.content.length}:${f.mtimeMs}`;
 
 function webStoreKey(key: string) {
   return `mdv:${key}`;
@@ -205,7 +236,8 @@ function webStoreKey(key: string) {
 export async function readFile(path: string, opts?: { encoding?: string; force?: boolean }): Promise<FileData> {
   if (isTauri) {
     const f = await invoke<FileData>('read_file', { path, encoding: opts?.encoding ?? null, force: opts?.force ?? null });
-    return { ...f, content: normaliseEol(f.content) };
+    const content = normaliseEol(f.content);
+    return { ...f, content, mixedEol: content !== f.content };
   }
   const web = (content: string, mtimeMs: number): FileData => ({
     path,
@@ -217,23 +249,47 @@ export async function readFile(path: string, opts?: { encoding?: string; force?:
     encoding: 'UTF-8',
     bom: false,
     binary: false,
+    lossy: false,
+    version: webVersion({ content, mtimeMs }),
   });
   const cached = webFiles.get(path);
   if (cached) return web(cached.content, cached.mtimeMs);
   const res = await fetch(path);
-  if (!res.ok) throw new Error(`Could not open ${baseName(path)}`);
+  if (!res.ok) throw new Error(`${res.status === 404 ? 'NOTFOUND: ' : ''}Could not open ${baseName(path)}`);
   const content = await res.text();
   webFiles.set(path, { content, mtimeMs: Date.now() });
   return web(content, Date.now());
 }
 
-export async function writeFile(path: string, content: string, enc?: FileEncoding): Promise<{ mtimeMs: number }> {
+/**
+ * Saves text. With `expected` (the version the text was based on) the save is refused with a
+ * `CONFLICT:` error when another program changed the file meanwhile, unless `force` is set.
+ */
+export async function writeFile(
+  path: string,
+  content: string,
+  enc?: FileEncoding,
+  check?: { expected?: string | null; force?: boolean },
+): Promise<WriteResult> {
   if (isTauri) {
-    return invoke<{ mtimeMs: number }>('write_file', { path, content, encoding: enc?.encoding ?? null, bom: enc?.bom ?? null });
+    return invoke<WriteResult>('write_file', {
+      path, content, encoding: enc?.encoding ?? null, bom: enc?.bom ?? null,
+      expected: check?.expected ?? null, force: check?.force ?? null,
+    });
   }
-  const mtimeMs = Date.now();
-  webFiles.set(path, { content, mtimeMs });
-  return { mtimeMs };
+  const current = webFiles.get(path);
+  if (current && check?.expected && !check.force && webVersion(current) !== check.expected) {
+    throw new Error(`CONFLICT: ${baseName(path)} changed on disk after Margin last read or saved it.`);
+  }
+  const file = { content, mtimeMs: Math.max(Date.now(), (current?.mtimeMs ?? 0) + 1) };
+  webFiles.set(path, file);
+  return { mtimeMs: file.mtimeMs, version: webVersion(file) };
+}
+
+/** Browser fallback only: simulate another program changing a file (used by tests). */
+export function webSimulateExternalWrite(path: string, content: string): void {
+  const prev = webFiles.get(path);
+  webFiles.set(path, { content, mtimeMs: Math.max(Date.now(), (prev?.mtimeMs ?? 0) + 1) });
 }
 
 export async function writeBinary(path: string, bytes: Uint8Array): Promise<void> {
@@ -259,6 +315,12 @@ export async function listDir(path: string): Promise<DirEntry[]> {
   return [];
 }
 
+/** Markdown and text files anywhere under `folder` (hidden entries and node_modules skipped). */
+export async function listFiles(folder: string, limit = 5000): Promise<DirEntry[]> {
+  if (isTauri) return invoke<DirEntry[]>('list_files', { path: folder, limit });
+  return listDir(folder);
+}
+
 export async function fileMeta(path: string): Promise<FileMeta> {
   if (isTauri) return invoke<FileMeta>('file_meta', { path });
   const f = webFiles.get(path);
@@ -279,10 +341,21 @@ export async function onFileChanged(cb: (change: FileChange) => void): Promise<U
   return listen<FileChange>('file-changed', (e) => cb(e.payload));
 }
 
+/**
+ * Later launches (an Explorer double-click, Win+R `note`) queue their files in the desktop side
+ * and ping the window. Each request is a list of paths; an empty list asks for a blank note.
+ * Requests queued before this listener existed are collected straight away.
+ */
 export async function onOpenFiles(cb: (paths: string[]) => void): Promise<Unlisten> {
   if (!isTauri) return () => undefined;
   const { listen } = await import('@tauri-apps/api/event');
-  return listen<string[]>('open-files', (e) => cb(e.payload));
+  const drain = async () => {
+    const requests = await invoke<string[][]>('take_open_requests').catch(() => [] as string[][]);
+    requests.forEach((paths) => cb(paths));
+  };
+  const off = await listen('open-files', () => void drain());
+  void drain();
+  return off;
 }
 
 export async function launchFiles(): Promise<string[]> {
