@@ -424,7 +424,6 @@
 .hljs-comment,
 .hljs-quote {
   color: var(--syn-comment);
-  font-style: italic;
 }
 .hljs-keyword,
 .hljs-selector-tag,
@@ -478,11 +477,12 @@
 .hljs-meta {
   color: var(--syn-punct);
 }
+/* Code stays code: colour only, never a different weight or slant. */
 .hljs-emphasis {
-  font-style: italic;
+  color: var(--doc-muted);
 }
 .hljs-strong {
-  font-weight: 700;
+  color: var(--doc-heading);
 }
 
 /* tables */

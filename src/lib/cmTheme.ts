@@ -1,19 +1,19 @@
-/* One CodeMirror look for Source mode and for code blocks inside the editor, driven by the theme variables. */
+/* One CodeMirror look for Source mode and for code blocks inside the editor, driven by the theme variables.
+   Code stays code: every token is coloured only. No rule may change size, weight or slant, or a line typed as
+   "# Title" or "**bold**" would grow, shift its neighbours and change the line height mid-block. */
 import { HighlightStyle } from '@codemirror/language';
 import { EditorView } from '@codemirror/view';
 import { tags as t } from '@lezer/highlight';
 
 export const cmHighlight = HighlightStyle.define([
-  { tag: t.heading1, color: 'var(--doc-heading)', fontWeight: '700', fontSize: '1.25em' },
-  { tag: t.heading2, color: 'var(--doc-heading)', fontWeight: '700', fontSize: '1.12em' },
-  { tag: [t.heading3, t.heading4, t.heading5, t.heading6], color: 'var(--doc-heading)', fontWeight: '650' },
-  { tag: t.strong, fontWeight: '700', color: 'var(--doc-heading)' },
-  { tag: t.emphasis, fontStyle: 'italic' },
+  { tag: [t.heading, t.heading1, t.heading2, t.heading3, t.heading4, t.heading5, t.heading6], color: 'var(--syn-func)' },
+  { tag: t.strong, color: 'var(--doc-heading)' },
+  { tag: t.emphasis, color: 'var(--doc-muted)' },
   { tag: t.strikethrough, textDecoration: 'line-through', color: 'var(--text-3)' },
   { tag: [t.link, t.url], color: 'var(--accent)' },
   { tag: t.monospace, color: 'var(--syn-string)' },
   { tag: [t.processingInstruction, t.meta, t.contentSeparator], color: 'var(--text-3)' },
-  { tag: t.quote, color: 'var(--doc-muted)', fontStyle: 'italic' },
+  { tag: t.quote, color: 'var(--doc-muted)' },
   { tag: t.list, color: 'var(--accent)' },
   { tag: [t.comment, t.lineComment, t.blockComment], color: 'var(--syn-comment)' },
   { tag: [t.keyword, t.controlKeyword, t.operatorKeyword, t.modifier], color: 'var(--syn-keyword)' },
