@@ -523,9 +523,13 @@ button:disabled {
 .tabs-wrap[data-overflow-right] {
   --edge-r: transparent;
 }
+/* Chrome's tab sizing: every tab starts at --tab-max and they all shrink together as more open,
+   down to --tab-min. Past that the strip scrolls. A tab's width never depends on its title, so
+   typing a new note's first line never moves the strip. */
 .tabs {
-  --tab-w: 196px;
-  --tab-min: 120px;
+  --tab-max: 224px;
+  --tab-min: 96px;
+  position: relative;
   flex: 0 1 auto;
   min-width: 0;
   height: 100%;
@@ -535,9 +539,8 @@ button:disabled {
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
-  list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 0 1px;
   /* Hidden tabs fade out at an edge that has more behind it. The mask only uses alpha. */
   mask-image: linear-gradient(to right, var(--edge-l) 0, var(--text) var(--fade), var(--text) calc(100% - var(--fade)), var(--edge-r) 100%);
 }
@@ -548,7 +551,7 @@ button:disabled {
 .tabs-nav {
   position: absolute;
   top: 50%;
-  z-index: 1;
+  z-index: 4;
   width: 24px;
   height: 24px;
   translate: 0 -50%;
@@ -590,11 +593,12 @@ button:disabled {
   min-width: 56px;
   align-self: stretch;
 }
-/* Equal widths (Chrome, Windows 11 Notepad): every close button sits in a predictable place. */
 .tab {
   position: relative;
-  flex: 0 1 var(--tab-w);
-  width: var(--tab-w);
+  /* A fixed width that only shrinks: the strip's natural width is then tabs × --tab-max, never
+     the width of their titles. */
+  flex: 0 1 var(--tab-max);
+  width: var(--tab-max);
   min-width: var(--tab-min);
   display: flex;
   align-items: center;
@@ -604,7 +608,26 @@ button:disabled {
   border-radius: var(--r-sm);
   color: var(--text-3);
   font-weight: 500;
-  overflow: hidden;
+  /* The strip handles the pointer itself (drag to reorder or tear off). */
+  touch-action: none;
+}
+/* Thin dividers between inactive tabs, as in Chrome. None next to the active or hovered tab. */
+.tab + .tab::before {
+  content: '';
+  position: absolute;
+  left: -2px;
+  top: 9px;
+  bottom: 9px;
+  width: 1px;
+  background: var(--line-2);
+  transition: opacity var(--t-fast);
+}
+.tab[data-active='true']::before,
+.tab[data-active='true'] + .tab::before,
+.tab:hover::before,
+.tab:hover + .tab::before,
+.tabs[data-dragging] .tab::before {
+  opacity: 0;
 }
 .tab:hover {
   color: var(--text-2);
@@ -612,23 +635,38 @@ button:disabled {
 }
 .tab[data-active='true'] {
   color: var(--text);
-  background: none;
+  background: var(--control-on);
+  box-shadow: var(--control-ring);
 }
 .tab:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
-  border-radius: var(--r-sm);
 }
-.tab-bg {
-  position: absolute;
-  inset: 0;
-  border-radius: var(--r-sm);
-  background: var(--control-on);
-  box-shadow: var(--control-ring);
+/* The tab being dragged rides above the others on a solid surface. */
+.tab[data-dragged] {
+  z-index: 3;
+  color: var(--text);
+  background: var(--tile-2);
+  box-shadow: var(--control-ring), var(--shadow-pop);
+  cursor: grabbing;
+}
+.tabs[data-dragging] {
+  cursor: grabbing;
+}
+/* A new tab grows in. `scale`, not `transform`: dragging uses the transform. */
+.tab[data-fresh] {
+  animation: tab-in 220ms var(--ease-out);
+}
+@keyframes tab-in {
+  from {
+    opacity: 0;
+    scale: 0.92;
+  }
 }
 .tabs[data-frozen] .tab {
-  width: var(--tab-frozen);
   flex: 0 0 var(--tab-frozen);
+  width: var(--tab-frozen);
+  min-width: 0;
 }
 .tab-name {
   position: relative;
@@ -682,10 +720,10 @@ button:disabled {
 .tab[data-dirty] .tab-close:hover .tab-dot {
   scale: 0;
 }
-/* Always above the strip, so nothing dragged or animating can paint over it. */
+/* Right after the last tab and always above the strip, so nothing dragged can paint over it. */
 .tab-new {
   position: relative;
-  z-index: 2;
+  z-index: 5;
   margin-left: 2px;
   width: 28px;
   height: 28px;

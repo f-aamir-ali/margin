@@ -14,7 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { requestClose, requestCloseTabs, runCommand } from '../lib/commands';
+import { moveTabToNewWindow, requestClose, requestCloseTabs, runCommand } from '../lib/commands';
 import { isTauri, onContextMenuRoute, openExternal, revealInExplorer } from '../lib/platform';
 import { useSettings } from '../lib/settings';
 import { activeDoc, useApp } from '../lib/store';
@@ -133,6 +133,7 @@ function build(target: HTMLElement): MenuItem[] {
       { id: 'close', label: 'Close', icon: <X size={15} />, keys: 'Ctrl+W', run: () => requestClose(d.id) },
       { id: 'others', label: 'Close others', disabled: !others.length, run: () => requestCloseTabs(others.map((x) => x.id)) },
       { id: 'right', label: 'Close tabs to the right', disabled: !right.length, run: () => requestCloseTabs(right.map((x) => x.id)) },
+      ...(isTauri ? [{ id: 'window', label: 'Move to new window', disabled: !others.length, separatorBefore: true, run: () => void moveTabToNewWindow(d.id) }] : []),
       { id: 'path', label: 'Copy path', icon: <Copy size={15} />, disabled: !d.path, separatorBefore: true, run: () => void copyText(d.path ?? '', 'Path copied') },
       { id: 'reveal', label: 'Show in File Explorer', icon: <FolderOpen size={15} />, disabled: !d.path, run: () => void (d.path && revealInExplorer(d.path)) },
     ];

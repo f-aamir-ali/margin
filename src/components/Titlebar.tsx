@@ -1,4 +1,4 @@
-import { AnimatePresence, Reorder, motion, useMotionValue } from 'motion/react';
+import { AnimatePresence } from 'motion/react';
 import {
   BookOpen,
   ChevronLeft,
@@ -24,24 +24,71 @@ import {
   X,
   Command as CommandIcon,
 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { requestClose, requestQuit, runCommand, setMode } from '../lib/commands';
-import { appWindow, isProseName, isTauri } from '../lib/platform';
+import {
+  appWindow,
+  emitToWindow,
+  isProseName,
+  isTauri,
+  moveWindow,
+  onWindowEvent,
+  openTabWindow,
+  tabDropTarget,
+  windowLabel,
+} from '../lib/platform';
 import { attachSnapLayout } from '../lib/snapLayout';
 import type { ViewMode } from '../lib/settings';
-import { activeDoc, displayName, isDirty, useApp, type Doc } from '../lib/store';
-import { IconButton, Menu, Segmented, SPRING, type MenuItem } from './ui/controls';
+import { activeDoc, displayName, flushAll, isDirty, useApp, type Doc } from '../lib/store';
+import { toast } from '../lib/toast';
+import { IconButton, Menu, Segmented, type MenuItem } from './ui/controls';
 
-/** How far a tab's drag may travel: from the first tab's left edge to the last tab's right edge. */
-interface DragBounds {
-  left: number;
-  right: number;
-  top: number;
-  bottom: number;
-}
-
+/** Pointer travel (px) before a press on a tab becomes a drag, as in Chrome. */
+const DRAG_START = 5;
+/** How far above or below its start (px) a dragged tab must go to leave the bar for its own window. */
+const TEAR_OFF = 40;
+/** The slide every tab uses to settle into its slot. */
+const SETTLE = 'transform 200ms cubic-bezier(0.22, 1, 0.36, 1)';
 /** Breathing room kept between the active tab and the edge of the strip when it is scrolled into view. */
 const EDGE_GAP = 32;
+
+interface Tear {
+  /** The window that follows the pointer: a new one, or this one when it only has this tab. */
+  label: string | null;
+  own: boolean;
+  ready: Promise<string | null>;
+  /** Where in that window (CSS px from its top-left corner) the pointer holds it. */
+  offX: number;
+  offY: number;
+  screenX: number;
+  screenY: number;
+  raf: number;
+}
+
+interface Drag {
+  pointerId: number;
+  id: string;
+  el: HTMLElement;
+  startX: number;
+  startY: number;
+  startScroll: number;
+  grabX: number;
+  grabY: number;
+  started: boolean;
+  /** Tabs in order when the drag started, with their layout positions in the strip. */
+  slots: HTMLElement[];
+  lefts: number[];
+  width: number;
+  step: number;
+  from: number;
+  to: number;
+  dx: number;
+  tear?: Tear;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Physical screen pixels, which is what the window manager works in. */
+const physical = (cssPx: number) => cssPx * window.devicePixelRatio;
 
 export function Titlebar() {
   const docs = useApp((s) => s.docs);
@@ -53,17 +100,20 @@ export function Titlebar() {
   const [maximized, setMaximized] = useState(false);
   const tabsRef = useRef<HTMLDivElement>(null);
   const maximizeRef = useRef<HTMLButtonElement>(null);
-  // Mutated in place on drag start (see measureDrag) and read by motion, so it needs no re-render.
-  const dragBounds = useRef<DragBounds>({ left: 0, right: 0, top: 0, bottom: 0 }).current;
+  const drag = useRef<Drag | null>(null);
+  /** Set when a drop reorders the tabs: the dropped tab slides from where it was let go. */
+  const flip = useRef<{ id: string; visual: number } | null>(null);
   const [overflow, setOverflow] = useState({ left: false, right: false });
+  // Tabs present at first paint don't play the "new tab" animation.
+  const known = useRef<Set<string> | null>(null);
+  if (!known.current) known.current = new Set(docs.map((d) => d.id));
+  // While the pointer stays on the tab strip after closing a tab, tabs keep their width (as in
+  // Chrome), so the next tab's close button slides under the cursor. `pad` stands in for the
+  // closed tabs, so a scrolled strip keeps its length and doesn't jump sideways.
+  const [frozen, setFrozen] = useState<{ width: number; pad: number } | null>(null);
+
   // Windows 11: resting on Maximise shows the Snap Layouts flyout, as in every native app.
   useEffect(() => (maximizeRef.current ? attachSnapLayout(maximizeRef.current) : undefined), []);
-  // While the pointer stays on the tab strip after closing a tab, tabs keep their width
-  // (as in Chrome), so the next tab's close button slides under the cursor.
-  // `pad` stands in for the closed tabs so the strip keeps its length: a scrolled strip would
-  // otherwise jump sideways when it gets shorter.
-  const [frozen, setFrozen] = useState<{ width: number; pad: number } | null>(null);
-  const frozenWidth = frozen?.width ?? null;
 
   useEffect(() => {
     let off: (() => void) | undefined;
@@ -95,7 +145,11 @@ export function Titlebar() {
     };
   }, []);
 
-  /** Scrolls the strip, and only the strip, so the titlebar and its clipped parents never move. */
+  /** A document's tab element. */
+  const tabEl = (id: string) =>
+    [...(tabsRef.current?.querySelectorAll<HTMLElement>('[role="tab"]') ?? [])].find((t) => t.dataset.docId === id);
+
+  /** Scrolls the strip, and only the strip, so the title bar itself never moves. */
   const scrollTabIntoView = (el: HTMLElement, behavior: ScrollBehavior) => {
     const strip = tabsRef.current;
     if (!strip) return;
@@ -106,63 +160,260 @@ export function Titlebar() {
     if (delta !== 0) strip.scrollTo({ left: strip.scrollLeft + delta, behavior });
   };
 
-  /** A document's tab element. A closing tab can linger in the DOM for a moment, so never match by position. */
-  const tabEl = (id: string) => [...(tabsRef.current?.querySelectorAll<HTMLElement>('[role="tab"]') ?? [])].find((t) => t.dataset.docId === id);
-  // Until this time (performance.now()), focus stays on the active tab. Set by keyboard moves.
-  const keyboardMove = useRef(0);
-  // The document of the tab that focus was last on ('' for a tab without one, null when focus was elsewhere).
-  const lastStripDoc = useRef<string | null>(null);
-  // Switching documents mounts the editor, which takes focus a moment after the commit. Within the
-  // window after a keyboard move, that focus goes back to the tab.
-  useEffect(() => {
-    const onFocusIn = (e: FocusEvent) => {
-      const strip = tabsRef.current;
-      if (!strip) return;
-      const inStrip = strip.contains(e.target as Node);
-      lastStripDoc.current = inStrip ? ((e.target as HTMLElement).dataset.docId ?? '') : null;
-      if (!inStrip && performance.now() <= keyboardMove.current) tabEl(useApp.getState().activeId ?? '')?.focus({ preventScroll: true });
-    };
-    document.addEventListener('focusin', onFocusIn);
-    return () => document.removeEventListener('focusin', onFocusIn);
-  }, []);
-  // Keep the active tab in view when it changes or a tab is added. Not when one closes:
-  // scrolling then would move the close button that is under the pointer.
+  // Keep the active tab in view, and keep keyboard focus on the strip following the active tab.
   const lastCount = useRef(docs.length);
   useEffect(() => {
     const added = docs.length > lastCount.current;
     lastCount.current = docs.length;
-    const strip = tabsRef.current;
     const el = activeId ? tabEl(activeId) : undefined;
-    if (!strip || !el) return;
-    // Focus follows the active tab. Ctrl+W is global and always closes the active tab, so a focused
-    // tab has to be the active one for Ctrl+W to close the tab that has focus. This effect runs after
-    // the editor's own focus effect (children's effects run first), so it has the last word.
-    const focused = lastStripDoc.current;
-    if (focused && !docs.some((d) => d.id === focused)) keyboardMove.current = performance.now() + 600;
-    const focusLost = !document.activeElement || document.activeElement === document.body;
-    if (performance.now() <= keyboardMove.current || (focused !== null && (focusLost || (strip.contains(document.activeElement) && document.activeElement !== el)))) {
-      el.focus({ preventScroll: true });
-    }
-    if (frozenWidth !== null && !added) return;
+    if (!el) return;
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && focused !== el && focused.closest('.tabs [role="tab"]')) el.focus({ preventScroll: true });
+    // Not right after a close with the mouse: that would move the close button under the pointer.
+    if (frozen !== null && !added) return;
     scrollTabIntoView(el, 'smooth');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId, docs.length]);
 
-  /**
-   * Limits a dragged tab to the first and last slots, measured at pointer down from the tab's layout
-   * box (offsetLeft ignores transforms and scroll). Motion reads these once, when the drag starts, and
-   * keeps them for the whole drag, so each Tab also clamps its own position on every drag frame.
-   */
-  const measureDrag = (el: HTMLElement) => {
+  // After a drop has reordered the tabs, every tab is already at its new slot except the dropped
+  // one, which slides from where the pointer let go of it. This runs before the browser paints.
+  useLayoutEffect(() => {
+    const f = flip.current;
+    if (!f) return;
+    flip.current = null;
     const strip = tabsRef.current;
     if (!strip) return;
-    // scrollWidth would count the translation of a tab that is already dragged, so use the last tab's layout box.
-    const tabs = strip.querySelectorAll<HTMLElement>('.tab');
-    const last = tabs[tabs.length - 1];
-    const contentRight = last ? last.offsetLeft + last.offsetWidth : strip.clientWidth;
-    dragBounds.left = -el.offsetLeft;
-    dragBounds.right = contentRight - el.offsetLeft - el.offsetWidth;
+    const tabs = [...strip.querySelectorAll<HTMLElement>('[role="tab"]')];
+    for (const t of tabs) {
+      t.style.transition = 'none';
+      t.style.transform = '';
+    }
+    const el = tabEl(f.id);
+    if (el) {
+      el.style.transform = `translateX(${f.visual - el.offsetLeft}px)`;
+      void el.offsetWidth;
+      el.style.transition = SETTLE;
+      el.style.transform = '';
+    }
+    window.setTimeout(() => tabs.forEach((t) => (t.style.transition = '')), 240);
+  }, [docs]);
+
+  /* ---------- dragging tabs: reorder, tear off into a window, drop on another window ---------- */
+
+  const resetSlots = (d: Drag, animate: boolean) => {
+    for (const t of d.slots) {
+      t.style.transition = animate ? SETTLE : 'none';
+      t.style.transform = '';
+    }
+    delete d.el.dataset.dragged;
+    delete tabsRef.current?.dataset.dragging;
+    window.setTimeout(() => d.slots.forEach((t) => (t.style.transition = '')), animate ? 240 : 0);
   };
+
+  const beginDrag = (d: Drag) => {
+    const strip = tabsRef.current;
+    if (!strip) return;
+    d.started = true;
+    d.slots = [...strip.querySelectorAll<HTMLElement>('[role="tab"]')];
+    d.lefts = d.slots.map((t) => t.offsetLeft);
+    d.from = d.slots.indexOf(d.el);
+    d.to = d.from;
+    d.width = d.el.offsetWidth;
+    d.step = d.slots.length > 1 ? d.lefts[1] - d.lefts[0] : d.width + 2;
+    for (const t of d.slots) t.style.transition = t === d.el ? 'none' : SETTLE;
+    d.el.dataset.dragged = '';
+    strip.dataset.dragging = '';
+  };
+
+  const onStripPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || drag.current) return;
+    const target = e.target as HTMLElement;
+    const tab = target.closest<HTMLElement>('[role="tab"]');
+    if (!tab || target.closest('.tab-close')) return;
+    const id = tab.dataset.docId;
+    if (!id) return;
+    useApp.getState().activate(id);
+    // The strip holds the pointer for the whole drag: it outlives a tab that leaves for a new window.
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const r = tab.getBoundingClientRect();
+    drag.current = {
+      pointerId: e.pointerId,
+      id,
+      el: tab,
+      startX: e.clientX,
+      startY: e.clientY,
+      startScroll: e.currentTarget.scrollLeft,
+      grabX: e.clientX - r.left,
+      grabY: e.clientY - r.top,
+      started: false,
+      slots: [],
+      lefts: [],
+      width: 0,
+      step: 0,
+      from: 0,
+      to: 0,
+      dx: 0,
+    };
+  };
+
+  const onStripPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    const strip = tabsRef.current;
+    if (!d || !strip || e.pointerId !== d.pointerId) return;
+    if (d.tear) {
+      followTear(d.tear, e.screenX, e.screenY);
+      return;
+    }
+    const dy = e.clientY - d.startY;
+    let dx = e.clientX - d.startX + (strip.scrollLeft - d.startScroll);
+    if (!d.started) {
+      if (Math.hypot(dx, dy) < DRAG_START) return;
+      beginDrag(d);
+    }
+    // Far enough above or below the bar: the tab leaves it, like a Chrome tab.
+    if (isTauri && Math.abs(dy) > TEAR_OFF) {
+      tearOff(d, e);
+      return;
+    }
+    // Near an edge of a strip that scrolls: scroll it along.
+    const bar = strip.getBoundingClientRect();
+    if (strip.scrollWidth > strip.clientWidth) {
+      if (e.clientX < bar.left + 24) strip.scrollLeft -= 10;
+      else if (e.clientX > bar.right - 24) strip.scrollLeft += 10;
+      dx = e.clientX - d.startX + (strip.scrollLeft - d.startScroll);
+    }
+    // The tab stays inside the strip: from the first slot to the last, never under the + button.
+    const last = d.lefts.length - 1;
+    dx = Math.max(-d.lefts[d.from], Math.min(d.lefts[last] - d.lefts[d.from], dx));
+    d.dx = dx;
+    d.el.style.transform = `translateX(${dx}px)`;
+    // Its new slot is the one it is nearest, so it swaps with a neighbour once it covers half of
+    // it, as in Chrome. (Slots are equal steps apart: every tab has the same width.)
+    const to = Math.max(0, Math.min(last, Math.round((d.lefts[d.from] + dx - d.lefts[0]) / d.step)));
+    if (to === d.to) return;
+    d.to = to;
+    d.slots.forEach((t, i) => {
+      if (i === d.from) return;
+      const shift = d.from < to && i > d.from && i <= to ? -d.step : to < d.from && i >= to && i < d.from ? d.step : 0;
+      t.style.transform = shift ? `translateX(${shift}px)` : '';
+    });
+  };
+
+  const endDrag = (e: ReactPointerEvent<HTMLDivElement>, cancelled: boolean) => {
+    const d = drag.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    drag.current = null;
+    if (tabsRef.current?.hasPointerCapture(e.pointerId)) tabsRef.current.releasePointerCapture(e.pointerId);
+    if (d.tear) {
+      void finishTear(d, e.screenX, e.screenY, cancelled);
+      return;
+    }
+    if (!d.started) return;
+    if (cancelled || d.to === d.from) {
+      resetSlots(d, true);
+      return;
+    }
+    delete d.el.dataset.dragged;
+    delete tabsRef.current?.dataset.dragging;
+    flip.current = { id: d.id, visual: d.lefts[d.from] + d.dx };
+    useApp.getState().moveDoc(d.from, d.to);
+  };
+
+  const followTear = (t: Tear, screenX: number, screenY: number) => {
+    t.screenX = screenX;
+    t.screenY = screenY;
+    if (t.raf || !t.label) return;
+    t.raf = requestAnimationFrame(() => {
+      t.raf = 0;
+      if (t.label) void moveWindow(t.label, physical(t.screenX - t.offX), physical(t.screenY - t.offY));
+    });
+  };
+
+  const tearOff = (d: Drag, e: ReactPointerEvent<HTMLDivElement>) => {
+    resetSlots(d, false);
+    const own = useApp.getState().docs.length === 1;
+    const strip = tabsRef.current as HTMLElement;
+    const tabTop = d.el.getBoundingClientRect().top;
+    // A new window opens with this tab first in its strip, so the pointer holds it where it
+    // holds the tab now. A window with only this tab moves as it is, from the point grabbed.
+    const offX = own ? e.clientX : strip.getBoundingClientRect().left + d.grabX;
+    const offY = own ? e.clientY : tabTop + d.grabY;
+    const tear: Tear = { label: own ? windowLabel : null, own, ready: Promise.resolve(windowLabel), offX, offY, screenX: e.screenX, screenY: e.screenY, raf: 0 };
+    d.tear = tear;
+    if (own) return;
+    tear.ready = (async () => {
+      if (!(await useApp.getState().detachDoc(d.id))) return null;
+      try {
+        const label = await openTabWindow([d.id], physical(tear.screenX - offX), physical(tear.screenY - offY));
+        tear.label = label;
+        followTear(tear, tear.screenX, tear.screenY);
+        return label;
+      } catch (err) {
+        toast.error("Couldn't open a new window", String(err instanceof Error ? err.message : err));
+        await useApp.getState().adoptDoc(d.id, d.from);
+        return null;
+      }
+    })();
+  };
+
+  const finishTear = async (d: Drag, screenX: number, screenY: number, cancelled: boolean) => {
+    const t = d.tear as Tear;
+    cancelAnimationFrame(t.raf);
+    t.raf = 0;
+    const label = await t.ready;
+    if (!label) return;
+    if (!cancelled) await moveWindow(label, physical(screenX - t.offX), physical(screenY - t.offY)).catch(() => undefined);
+    const target = cancelled ? null : await tabDropTarget(physical(screenX), physical(screenY), [label]);
+    // For the desktop tests: where the last drop landed.
+    (window as unknown as { __marginLastDrop?: unknown }).__marginLastDrop = { screenX, screenY, dpr: window.devicePixelRatio, label, own: t.own, target };
+    if (t.own) {
+      // This window's only tab was dropped on another window: it joins that window, and this
+      // window closes, as in Chrome.
+      if (!target) return;
+      if (await useApp.getState().detachDoc(d.id)) {
+        await emitToWindow(target.label, 'adopt-tab', { id: d.id, clientX: target.clientX });
+        await flushAll().catch(() => undefined);
+        await appWindow.destroy();
+      }
+      return;
+    }
+    if (!target) {
+      // Left on its own: the new window comes to the front.
+      void emitToWindow(label, 'take-focus');
+      return;
+    }
+    // Dropped on a tab bar (this window's or another's): the new window hands the tab over and
+    // closes. It may still be starting up, so keep asking until it answers.
+    const nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+    let acked = false;
+    const off = await onWindowEvent<string>('transfer-ack', (n) => {
+      if (n === nonce) acked = true;
+    });
+    try {
+      for (let i = 0; i < 40 && !acked; i++) {
+        await emitToWindow(label, 'transfer-out', { target: target.label, clientX: target.clientX, nonce });
+        await sleep(150);
+      }
+    } finally {
+      off();
+    }
+  };
+
+  // Escape while dragging puts the tab back.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const d = drag.current;
+      if (e.key !== 'Escape' || !d || !d.started || d.tear) return;
+      e.preventDefault();
+      e.stopPropagation();
+      drag.current = null;
+      if (tabsRef.current?.hasPointerCapture(d.pointerId)) tabsRef.current.releasePointerCapture(d.pointerId);
+      resetSlots(d, true);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     const strip = tabsRef.current;
@@ -176,15 +427,14 @@ export function Titlebar() {
     strip?.scrollTo({ left: strip.scrollLeft + direction * strip.clientWidth * 0.7, behavior: 'smooth' });
   };
 
-  /** Roving focus, like a native tab strip. Focus and activation move together, so Ctrl+W always matches the focused tab. */
+  /** Keyboard, like a native tab strip: arrows, Home and End move between tabs, Delete closes. */
   const onTabKey = (e: ReactKeyboardEvent<HTMLElement>, id: string) => {
     if (e.target !== e.currentTarget || e.altKey || e.ctrlKey || e.metaKey) return;
     const index = docs.findIndex((d) => d.id === id);
     const count = docs.length;
-    const focusDoc = (target: Doc) => {
-      keyboardMove.current = performance.now() + 600;
+    const go = (target: Doc) => {
       useApp.getState().activate(target.id);
-      tabEl(target.id)?.focus({ preventScroll: true });
+      requestAnimationFrame(() => tabEl(target.id)?.focus({ preventScroll: true }));
     };
     let target = -1;
     if (e.key === 'ArrowRight') target = (index + 1) % count;
@@ -193,16 +443,14 @@ export function Titlebar() {
     else if (e.key === 'End') target = count - 1;
     if (target >= 0) {
       e.preventDefault();
-      focusDoc(docs[target]);
+      go(docs[target]);
     } else if (e.key === 'Enter' || e.key === ' ') {
-      // Space is motion's keyboard grab; here it activates the tab instead.
       e.preventDefault();
       useApp.getState().activate(id);
     } else if (e.key === 'Delete') {
       e.preventDefault();
-      // Move focus off the tab first, so it isn't left on nothing when the tab unmounts.
       const next = docs[index + 1] ?? docs[index - 1];
-      if (next) focusDoc(next);
+      if (next) go(next);
       requestClose(id);
     }
   };
@@ -232,44 +480,42 @@ export function Titlebar() {
       </div>
 
       <div className="tabs-wrap" data-overflow-left={overflow.left || undefined} data-overflow-right={overflow.right || undefined}>
-        <Reorder.Group
-          as="div"
-          axis="x"
+        <div
           role="tablist"
           aria-label="Open notes"
           className="tabs"
           ref={tabsRef}
-          values={docs}
-          data-frozen={frozenWidth !== null || undefined}
-          style={frozenWidth !== null ? ({ '--tab-frozen': `${frozenWidth}px` } as React.CSSProperties) : undefined}
-          onReorder={(next: Doc[]) => useApp.setState({ docs: next })}
+          data-frozen={frozen !== null || undefined}
+          style={frozen !== null ? ({ '--tab-frozen': `${frozen.width}px` } as React.CSSProperties) : undefined}
+          onPointerDown={onStripPointerDown}
+          onPointerMove={onStripPointerMove}
+          onPointerUp={(e) => endDrag(e, false)}
+          onPointerCancel={(e) => endDrag(e, true)}
+          onLostPointerCapture={(e) => endDrag(e, false)}
           onPointerLeave={() => setFrozen(null)}
           onWheel={onWheel}
         >
-          <AnimatePresence initial={false} mode="popLayout">
-            {docs.map((d) => (
-              <Tab
-                key={d.id}
-                doc={d}
-                active={d.id === activeId}
-                dragBounds={dragBounds}
-                onMeasureDrag={measureDrag}
-                onKey={onTabKey}
-                onCloseClick={(w) => setFrozen((f) => ({ width: f?.width ?? w, pad: (f?.pad ?? 0) + w + 2 }))}
-              />
-            ))}
-          </AnimatePresence>
+          {docs.map((d) => (
+            <Tab
+              key={d.id}
+              doc={d}
+              active={d.id === activeId}
+              fresh={!known.current?.has(d.id)}
+              onKey={onTabKey}
+              onCloseClick={(w) => setFrozen((f) => ({ width: f?.width ?? w, pad: (f?.pad ?? 0) + w + 2 }))}
+            />
+          ))}
           {frozen && <div className="tabs-hold" style={{ flex: `0 0 ${frozen.pad}px`, width: frozen.pad }} aria-hidden />}
-        </Reorder.Group>
+        </div>
         {/* Overlaid on the strip's edges, and only shown while tabs are hidden past that edge. */}
-        <button type="button" className="tabs-nav tabs-nav-left" aria-label="Scroll tabs left" onClick={() => scrollStrip(-1)}>
+        <button type="button" className="tabs-nav tabs-nav-left" aria-label="Scroll tabs left" tabIndex={-1} onClick={() => scrollStrip(-1)}>
           <ChevronLeft size={14} />
         </button>
-        <button type="button" className="tabs-nav tabs-nav-right" aria-label="Scroll tabs right" onClick={() => scrollStrip(1)}>
+        <button type="button" className="tabs-nav tabs-nav-right" aria-label="Scroll tabs right" tabIndex={-1} onClick={() => scrollStrip(1)}>
           <ChevronRight size={14} />
         </button>
       </div>
-      {/* Outside the scrolling strip, so it never scrolls out of sight. */}
+      {/* Right after the last tab, outside the scrolling strip, so it never scrolls out of sight. */}
       <IconButton label="New note" keys="Ctrl+N" className="tab-new" onClick={() => runCommand('file.new')}>
         <Plus size={15} />
       </IconButton>
@@ -323,77 +569,40 @@ export function Titlebar() {
 function Tab({
   doc,
   active,
-  dragBounds,
-  onMeasureDrag,
+  fresh,
   onKey,
   onCloseClick,
 }: {
   doc: Doc;
   active: boolean;
-  dragBounds: DragBounds;
-  onMeasureDrag: (el: HTMLElement) => void;
+  fresh: boolean;
   onKey: (e: ReactKeyboardEvent<HTMLElement>, id: string) => void;
   onCloseClick: (width: number) => void;
 }) {
   const dirty = isDirty(doc);
   const name = displayName(doc);
-  const activate = useApp((s) => s.activate);
-  // From the store, not the prop: a closing tab keeps its last props while it animates out.
-  const selected = useApp((s) => s.activeId === doc.id);
-  // Our own x, so every drag frame can be held between the first and last slot. The bounds are
-  // measured from the tab's current slot each frame, so they stay right after it passes others.
-  const x = useMotionValue(0);
-  const itemRef = useRef<HTMLDivElement>(null);
-  const clampToStrip = () => {
-    const el = itemRef.current;
-    if (!el) return;
-    const strip = el.parentElement;
-    const tabs = strip?.querySelectorAll<HTMLElement>('.tab');
-    const last = tabs?.[tabs.length - 1];
-    if (!strip || !last) return;
-    const right = last.offsetLeft + last.offsetWidth;
-    const min = -el.offsetLeft;
-    const max = right - el.offsetLeft - el.offsetWidth;
-    const value = x.get();
-    if (value < min) x.set(min);
-    else if (value > max) x.set(max);
-  };
   return (
-    <Reorder.Item
-      as="div"
+    <div
       role="tab"
-      aria-selected={selected}
+      aria-selected={active}
       aria-label={dirty ? `${name}, unsaved` : name}
-      // Roving tab stop: only the active tab is in the Tab order. Passed explicitly, it overrides motion's own.
-      tabIndex={selected ? 0 : -1}
+      // Roving tab stop: only the active tab is in the Tab order.
+      tabIndex={active ? 0 : -1}
       data-doc-id={doc.id}
-      value={doc}
       className="tab"
       data-active={active}
       data-dirty={dirty || undefined}
+      data-fresh={fresh || undefined}
       title={doc.path ?? name}
-      initial={{ opacity: 0, scale: 0.94 }}
-      animate={{ opacity: 1, scale: 1 }}
-      exit={{ opacity: 0, scale: 0.94, transition: { duration: 0.12 } }}
-      transition={SPRING}
-      whileDrag={{ scale: 1.03, zIndex: 5 }}
-      // A hard stop at the strip's ends: the tab can't be dragged past the last slot or into the + button.
-      dragConstraints={dragBounds}
-      dragElastic={0}
-      style={{ x }}
-      ref={itemRef}
-      onDrag={clampToStrip}
-      onPointerDown={(e) => {
-        if (e.button !== 0) return;
-        onMeasureDrag(e.currentTarget);
-        activate(doc.id);
-      }}
       onKeyDown={(e) => onKey(e, doc.id)}
       onAuxClick={(e) => {
         if (e.button === 1) requestClose(doc.id);
       }}
+      onMouseDown={(e) => {
+        // Middle-click closes; it must not start Windows' autoscroll.
+        if (e.button === 1) e.preventDefault();
+      }}
     >
-      {active && <motion.span layoutId="tab-active" className="tab-bg" transition={SPRING} />}
       <span className="tab-name">{name}</span>
       <button
         type="button"
@@ -403,10 +612,9 @@ function Tab({
         aria-label={`Close ${name}`}
         // A click must not move focus off the tab that has it.
         onMouseDown={(e) => e.preventDefault()}
-        onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation();
-          // A real mouse click (not the keyboard): hold the tab widths still.
+          // A real mouse click (not the keyboard): hold the tab widths still while the pointer stays.
           if (e.detail > 0) onCloseClick((e.currentTarget.parentElement as HTMLElement).getBoundingClientRect().width);
           requestClose(doc.id);
         }}
@@ -414,6 +622,6 @@ function Tab({
         <span className="tab-dot" />
         <X size={13} />
       </button>
-    </Reorder.Item>
+    </div>
   );
 }

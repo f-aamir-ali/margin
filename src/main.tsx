@@ -15,7 +15,7 @@ import './styles/crepe.css';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App, { preloadEditor } from './App';
-import { appWindow, initAssetUrls, launchFiles, storeGet, storeSet } from './lib/platform';
+import { adoptedIds, appWindow, initAssetUrls, launchFiles, storeGet, storeSet } from './lib/platform';
 import { applySettings, useSettings } from './lib/settings';
 import { openTour, startDraftSync, useApp } from './lib/store';
 import { toast } from './lib/toast';
@@ -54,7 +54,8 @@ async function boot() {
   // The window starts hidden so there is never a white flash: reveal it once the first frame is painted.
   requestAnimationFrame(() => requestAnimationFrame(() => {
     performance.mark('margin-visible'); // read by tools/e2e/bench.mjs
-    void appWindow.show();
+    // A torn-off window must not take focus while its tab is still being dragged: the drop does that.
+    void (adoptedIds().length ? appWindow.reveal() : appWindow.show());
   }));
 
   // The other reading fonts and the editor are only needed later: load them when the app is idle.

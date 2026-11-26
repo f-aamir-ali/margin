@@ -1,5 +1,5 @@
 import { copyAsHtml, exportHtml, printDoc } from './export';
-import { appWindow, pickFiles, pickFolder, revealInExplorer } from './platform';
+import { appWindow, emitToWindow, isTauri, openTabWindow, pickFiles, pickFolder, revealInExplorer } from './platform';
 import { THEMES, useSettings, type ViewMode } from './settings';
 import { sourceApi } from './sourceApi';
 import { activeDoc, flushAll, flushEditors, isDirty, openTour, useApp, viewMode } from './store';
@@ -95,6 +95,20 @@ export async function requestQuit() {
     toast.error("Margin couldn't save this session", String(err instanceof Error ? err.message : err));
   } finally {
     quitting = false;
+  }
+}
+
+/** Chrome's "Move tab to new window": the tab opens in a new window just below and right of this one. */
+export async function moveTabToNewWindow(id: string) {
+  const app = useApp.getState();
+  if (!isTauri || app.docs.length < 2) return;
+  if (!(await app.detachDoc(id))) return;
+  const dpr = window.devicePixelRatio;
+  try {
+    await openTabWindow([id], (window.screenX + 48) * dpr, (window.screenY + 48) * dpr).then((label) => emitToWindow(label, 'take-focus'));
+  } catch (err) {
+    toast.error("Couldn't open a new window", String(err instanceof Error ? err.message : err));
+    await app.adoptDoc(id);
   }
 }
 

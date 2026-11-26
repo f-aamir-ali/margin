@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { storeGet, storeSet } from './platform';
+import { emitToAll, storeGet, storeSet, windowLabel } from './platform';
 
 export type ThemeId = 'carbon' | 'graphite' | 'midnight' | 'ember' | 'paper' | 'linen' | 'sepia' | 'mist';
 export type ViewMode = 'read' | 'edit' | 'source';
@@ -192,6 +192,8 @@ interface SettingsStore {
   loaded: boolean;
   systemDark: boolean;
   load: () => Promise<void>;
+  /** Reads the settings again (another window changed them). */
+  reload: () => Promise<void>;
   set: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
   patch: (partial: Partial<Settings>) => void;
   reset: (keys?: (keyof Settings)[]) => void;
@@ -200,7 +202,8 @@ interface SettingsStore {
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 function persist(settings: Settings) {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => void storeSet('settings', settings), 250);
+  // Other windows read the new settings once they are on disk.
+  saveTimer = setTimeout(() => void storeSet('settings', settings).then(() => emitToAll('settings-changed', windowLabel)), 250);
 }
 
 const media = typeof matchMedia !== 'undefined' ? matchMedia('(prefers-color-scheme: dark)') : null;
@@ -210,6 +213,10 @@ export const useSettings = create<SettingsStore>((set, get) => ({
   loaded: false,
   systemDark: media?.matches ?? true,
   async load() {
+    await get().reload();
+    media?.addEventListener('change', (e) => set({ systemDark: e.matches }));
+  },
+  async reload() {
     const saved = await storeGet<Partial<Settings>>('settings');
     const merged = { ...DEFAULT_SETTINGS };
     if (saved && typeof saved === 'object') {
@@ -221,7 +228,6 @@ export const useSettings = create<SettingsStore>((set, get) => ({
       }
     }
     set({ settings: merged, loaded: true });
-    media?.addEventListener('change', (e) => set({ systemDark: e.matches }));
   },
   set(key, value) {
     const settings = { ...get().settings, [key]: value };

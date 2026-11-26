@@ -14,9 +14,9 @@ import { Toasts } from './components/Toasts';
 import { Welcome } from './components/Welcome';
 import { Button, SPRING, TooltipLayer } from './components/ui/controls';
 import { handleShortcut, requestQuit, runCommand } from './lib/commands';
-import { appWindow, onFileChanged, onFilesDropped, onOpenFiles } from './lib/platform';
+import { appWindow, emitToAll, emitToWindow, onFileChanged, onFilesDropped, onOpenFiles, onWindowEvent, windowLabel } from './lib/platform';
 import { activeTheme, applySettings, isDarkTheme, useSettings, type ViewMode } from './lib/settings';
-import { activeDoc, canAutosave, displayName, flushAll, flushEditors, isDirty, useApp, viewMode, type Doc } from './lib/store';
+import { activeDoc, adoption, canAutosave, displayName, flushAll, flushEditors, isDirty, useApp, viewMode, type Doc } from './lib/store';
 import { attachSounds, play } from './lib/sound';
 import { countWords } from './lib/stats';
 import { toast } from './lib/toast';
@@ -118,6 +118,17 @@ export default function App() {
     // An empty list is a second launch with nothing to open (Win+R `note`): give a blank note.
     keep(onOpenFiles((paths) => (paths.length ? void useApp.getState().openPaths(paths) : useApp.getState().newDocIfNeeded())));
     keep(onFileChanged((c) => void useApp.getState().handleExternalChange(c.path, c.kind)));
+    // Other windows: a tab dropped on this window's tab bar, a request to hand a tab on, a file
+    // that is open here, and settings changed elsewhere.
+    keep(onWindowEvent<{ id: string; clientX: number }>('adopt-tab', ({ id, clientX }) => {
+      void useApp.getState().adoptDoc(id, tabIndexAt(clientX)).then(() => appWindow.show());
+    }));
+    keep(onWindowEvent<{ target: string; clientX: number; nonce: string }>('transfer-out', (msg) => void transferOut(msg)));
+    keep(onWindowEvent<string>('activate-path', (path) => useApp.getState().activatePath(path)));
+    keep(onWindowEvent<null>('take-focus', () => void appWindow.show()));
+    keep(onWindowEvent<string>('settings-changed', (from) => {
+      if (from !== windowLabel) void useSettings.getState().reload();
+    }));
     keep(
       onFilesDropped(
         (paths) => void useApp.getState().openPaths(paths),
@@ -218,6 +229,44 @@ export default function App() {
       </div>
     </MotionConfig>
   );
+}
+
+/** Where a tab dropped at `clientX` goes in this window's tab bar: before the first tab whose middle is right of it. */
+function tabIndexAt(clientX: number): number {
+  const tabs = [...document.querySelectorAll<HTMLElement>('.tabs [role="tab"]')];
+  const i = tabs.findIndex((t) => {
+    const r = t.getBoundingClientRect();
+    return clientX < r.left + r.width / 2;
+  });
+  return i < 0 ? tabs.length : i;
+}
+
+/**
+ * A torn-off window was dropped on another window's tab bar: hand every tab over, then close.
+ * Answers with an acknowledgement so the window that ran the drag stops asking.
+ */
+let transferring = false;
+async function transferOut({ target, clientX, nonce }: { target: string; clientX: number; nonce: string }) {
+  void emitToAll('transfer-ack', nonce);
+  if (transferring) return;
+  transferring = true;
+  try {
+    await adoption;
+    const app = useApp.getState();
+    let offset = 0;
+    for (const d of [...app.docs]) {
+      if (await app.detachDoc(d.id)) {
+        await emitToWindow(target, 'adopt-tab', { id: d.id, clientX: clientX + offset });
+        offset += 1;
+      }
+    }
+    if (!useApp.getState().docs.length) {
+      await flushAll().catch(() => undefined);
+      await appWindow.destroy();
+    }
+  } finally {
+    transferring = false;
+  }
 }
 
 function DocumentStage({ doc }: { doc: Doc }) {

@@ -26,6 +26,42 @@ pub async fn store_set(app: AppHandle, key: String, value: Value) -> Result<(), 
     blocking(move || store_set_sync(&dir, &key, &value)).await
 }
 
+/// Keys starting with `prefix` (the per-window sessions, `session-w2` and so on).
+#[tauri::command]
+pub async fn store_keys(app: AppHandle, prefix: String) -> Result<Vec<String>, String> {
+    let dir = config_dir(&app)?;
+    blocking(move || store_keys_sync(&dir, &prefix)).await
+}
+
+#[tauri::command]
+pub async fn store_delete(app: AppHandle, key: String) -> Result<(), String> {
+    let dir = config_dir(&app)?;
+    blocking(move || {
+        validate_key(&key)?;
+        match fs::remove_file(store_file(&dir, &key)) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(io_message("delete", &store_file(&dir, &key), &err)),
+        }
+    })
+    .await
+}
+
+fn store_keys_sync(dir: &Path, prefix: &str) -> Result<Vec<String>, String> {
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(io_message("read", dir, &err)),
+    };
+    let mut keys: Vec<String> = read
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.strip_suffix(".json").map(str::to_owned))
+        .filter(|key| key.starts_with(prefix) && validate_key(key).is_ok())
+        .collect();
+    keys.sort();
+    Ok(keys)
+}
+
 fn store_get_sync(dir: &Path, key: &str) -> Result<Option<Value>, String> {
     validate_key(key)?;
     let file = store_file(dir, key);
@@ -83,6 +119,18 @@ fn is_reserved_device_name(key: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn per_window_session_keys_are_listed_by_prefix() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let folder = dir.path();
+        for key in ["session", "session-w1", "session-w12", "closed-w1", "settings"] {
+            store_set_sync(folder, key, &json!({})).expect("set");
+        }
+        fs::write(folder.join("session-BAD.json"), "{}").expect("write");
+        assert_eq!(store_keys_sync(folder, "session-").expect("keys"), vec!["session-w1", "session-w12"]);
+        assert_eq!(store_keys_sync(&folder.join("missing"), "session-").expect("none"), Vec::<String>::new());
+    }
 
     #[test]
     fn accepts_plain_store_keys() {

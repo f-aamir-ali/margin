@@ -4,21 +4,17 @@
 //! show the flyout by itself. The front end calls `show_snap_layout` when the pointer rests on
 //! that button, and this presses Win+Z, the shortcut that opens Snap Layouts for the active window.
 
-use tauri::{AppHandle, Manager};
+use tauri::WebviewWindow;
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
     VIRTUAL_KEY, VK_LWIN,
 };
 
-const MAIN_WINDOW: &str = "main";
 const VK_Z: VIRTUAL_KEY = VIRTUAL_KEY(0x5A);
 
 /// Presses Win+Z when the main window is already in front.
-pub fn show(app: &AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window(MAIN_WINDOW)
-        .ok_or("The main window isn't open.")?;
+pub fn show(window: &WebviewWindow) -> Result<(), String> {
     // Hovering must never pull Margin in front of the app being used, and Win+Z goes to
     // whichever window is in front: only press it when Margin already is the front window.
     let hwnd = window.hwnd().map_err(|err| format!("No window handle: {err}."))?;

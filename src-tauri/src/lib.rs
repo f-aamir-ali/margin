@@ -5,6 +5,7 @@ mod snap_layout;
 #[cfg(windows)]
 mod spell_menu;
 mod store;
+mod tab_windows;
 mod watcher;
 #[cfg(windows)]
 mod window_corner;
@@ -13,10 +14,11 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State, Theme};
+use tauri::{AppHandle, Emitter, Manager, State, Theme, WebviewWindow};
 use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_window_state::StateFlags;
 
+use tab_windows::WindowState;
 use watcher::{SelfWrites, Watcher};
 
 const MAIN_WINDOW: &str = "main";
@@ -71,10 +73,7 @@ fn app_info(app: AppHandle) -> Result<AppInfo, String> {
 }
 
 #[tauri::command]
-fn set_window_theme(app: AppHandle, dark: bool) -> Result<(), String> {
-    let window = app
-        .get_webview_window(MAIN_WINDOW)
-        .ok_or("The main window isn't open.")?;
+fn set_window_theme(window: WebviewWindow, dark: bool) -> Result<(), String> {
     let theme = if dark { Theme::Dark } else { Theme::Light };
     window
         .set_theme(Some(theme))
@@ -83,14 +82,14 @@ fn set_window_theme(app: AppHandle, dark: bool) -> Result<(), String> {
 
 /// Opens Snap Layouts when the pointer rests on the maximize button. Only Windows has the flyout.
 #[tauri::command]
-fn show_snap_layout(app: AppHandle) -> Result<(), String> {
+fn show_snap_layout(window: WebviewWindow) -> Result<(), String> {
     #[cfg(windows)]
     {
-        snap_layout::show(&app)
+        snap_layout::show(&window)
     }
     #[cfg(not(windows))]
     {
-        let _ = app;
+        let _ = window;
         Ok(())
     }
 }
@@ -134,8 +133,9 @@ pub fn run() {
             if let Ok(mut queue) = app.state::<PendingOpens>().0.lock() {
                 queue.push(files);
             }
-            let _ = app.emit(OPEN_FILES, ());
-            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+            // The window used last answers it (with several windows open, like Chrome).
+            if let Some(window) = app.state::<WindowState>().target(app) {
+                let _ = window.emit_to(window.label(), OPEN_FILES, ());
                 let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -146,10 +146,17 @@ pub fn run() {
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
+                // Torn-off tab windows open where the tab was dropped; only the main window
+                // remembers its place.
+                .with_filter(|label| label == MAIN_WINDOW)
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(WindowState::default())
+        .on_window_event(|window, event| {
+            window.state::<WindowState>().on_window_event(window, event);
+        })
         .setup(|app| {
             #[cfg(windows)]
             if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
@@ -183,6 +190,16 @@ pub fn run() {
             watcher::unwatch_file,
             store::store_get,
             store::store_set,
+            store::store_keys,
+            store::store_delete,
+            drafts::draft_read,
+            tab_windows::claim_restore,
+            tab_windows::claim_path,
+            tab_windows::release_path,
+            tab_windows::focus_path_in,
+            tab_windows::open_tab_window,
+            tab_windows::move_window,
+            tab_windows::tab_drop_target,
             drafts::draft_write,
             drafts::draft_delete,
             drafts::draft_list,

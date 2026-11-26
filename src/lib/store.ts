@@ -21,6 +21,15 @@ import {
   errorMessage,
   joinPath,
   writeBinary,
+  windowLabel,
+  adoptedIds,
+  claimRestore,
+  claimPath,
+  releasePath,
+  focusPathIn,
+  storeKeys,
+  storeDelete,
+  draftRead,
   type Draft,
   type Eol,
   type FileData,
@@ -166,6 +175,12 @@ interface AppStore {
   retryDisk: (id: string) => Promise<void>;
   handleExternalChange: (path: string, kind: string) => Promise<void>;
   clearClosed: () => void;
+  /** Hands a tab to another window: its whole state goes to its draft, then it leaves this window. */
+  detachDoc: (id: string) => Promise<boolean>;
+  /** Takes in a tab handed over by another window (or opened with a torn-off window). */
+  adoptDoc: (id: string, index?: number) => Promise<boolean>;
+  /** Shows the tab for a file (another window asked, because the file is open here). */
+  activatePath: (path: string) => void;
   removeRecent: (path: string) => void;
   clearRecents: () => void;
   setSidebar: (patch: Partial<Pick<AppStore, 'sidebarOpen' | 'sidebarTab' | 'sidebarWidth' | 'folder'>>) => void;
@@ -186,6 +201,16 @@ export function pathKey(p: string): string {
     .toLowerCase();
 }
 export const samePath = (a: string, b: string) => pathKey(a) === pathKey(b);
+
+/**
+ * Each window keeps its own tab list and closed tabs. The first window of the next launch reads
+ * every window's lists and brings all their tabs back together in one window.
+ */
+const SESSION_KEY = windowLabel === 'main' ? 'session' : `session-${windowLabel}`;
+const CLOSED_KEY = windowLabel === 'main' ? 'closed' : `closed-${windowLabel}`;
+
+/** Resolves once a torn-off window has taken in the tabs it was opened with. */
+export let adoption: Promise<void> = Promise.resolve();
 
 /** Above this size a file opens as plain text: the markdown views would be slow. */
 const BIG_FILE = 5 * 1024 * 1024;
@@ -296,7 +321,7 @@ function persistSession(now = false) {
   clearTimeout(sessionTimer);
   const write = () => {
     const session = sessionSnapshot();
-    const task = sessionWrite.then(() => storeSet('session', session, true));
+    const task = sessionWrite.then(() => storeSet(SESSION_KEY, session, true));
     sessionWrite = task.catch((err) => console.warn('Could not save the session', err));
     return task;
   };
@@ -355,6 +380,7 @@ function toDraft(d: Doc): Draft {
     bom: d.bom,
     diskEncoding: d.diskEncoding,
     eol: d.eol,
+    scroll: d.scroll,
     updatedAt: Date.now(),
   };
 }
@@ -549,7 +575,7 @@ export function trimClosed(closed: ClosedTab[]): ClosedTab[] {
  */
 let closedWrite: Promise<void> = Promise.resolve();
 function persistClosed(): Promise<void> {
-  const task = closedWrite.then(() => storeSet('closed', useApp.getState().closed, true));
+  const task = closedWrite.then(() => storeSet(CLOSED_KEY, useApp.getState().closed, true));
   closedWrite = task.catch(() => undefined);
   return task;
 }
@@ -673,6 +699,7 @@ export function cleanDraft(raw: unknown): Draft | null {
     bom: d.bom === true,
     diskEncoding: typeof d.diskEncoding === 'string' ? d.diskEncoding : undefined,
     eol: asEol(d.eol),
+    scroll: typeof d.scroll === 'number' && Number.isFinite(d.scroll) ? d.scroll : undefined,
     updatedAt: typeof d.updatedAt === 'number' ? d.updatedAt : 0,
   };
 }
@@ -755,6 +782,33 @@ function recoveredCopy(name: string, content: string, kind: DocKind, mode: ViewM
   return { ...makeDoc(null, title, content, 0, mode, false, 0, kind, id), saved: '' };
 }
 
+/** Starts a window opened for torn-off tabs: shared preferences, then only the tabs it was given. */
+async function initAdopted(): Promise<void> {
+  const [recents, zoom, kinds, mainSession] = await Promise.all([
+    storeGet<RecentFile[]>('recents'),
+    storeGet<number>('zoom'),
+    storeGet<Record<string, DocKind>>('file-kinds'),
+    storeGet<Session>('session'),
+  ]);
+  kindOverrides = kinds && typeof kinds === 'object' && !Array.isArray(kinds) ? kinds : {};
+  useApp.setState({
+    recents: Array.isArray(recents) ? recents.filter((r) => r && typeof r.path === 'string') : [],
+    zoom: typeof zoom === 'number' && Number.isFinite(zoom) ? zoom : 1,
+    sidebarOpen: mainSession?.sidebarOpen ?? true,
+    sidebarTab: mainSession?.sidebarTab ?? 'outline',
+    sidebarWidth: mainSession?.sidebarWidth ?? 248,
+    folder: typeof mainSession?.folder === 'string' ? mainSession.folder : null,
+    lastMode: asMode(mainSession?.lastMode, 'read'),
+  });
+  startDraftSync();
+  adoption = (async () => {
+    for (const id of adoptedIds()) await useApp.getState().adoptDoc(id);
+  })();
+  await adoption;
+  useApp.setState({ ready: true });
+  void persistSession();
+}
+
 export const useApp = create<AppStore>((set, get) => ({
   docs: [],
   activeId: null,
@@ -771,17 +825,28 @@ export const useApp = create<AppStore>((set, get) => ({
   draftTrouble: null,
 
   async init() {
-    const [recents, rawSession, zoom, kinds, closed, list] = await Promise.all([
+    if (!(await claimRestore())) return initAdopted();
+    const [recents, rawSession, zoom, kinds, ownClosed, list, otherSessionKeys, otherClosedKeys] = await Promise.all([
       storeGet<RecentFile[]>('recents'),
-      storeGet<Session>('session'),
+      storeGet<Session>(SESSION_KEY),
       storeGet<number>('zoom'),
       storeGet<Record<string, DocKind>>('file-kinds'),
-      storeGet<ClosedTab[]>('closed'),
+      storeGet<ClosedTab[]>(CLOSED_KEY),
       draftList().catch((err) => {
         console.warn('Could not list the drafts', err);
         return { drafts: [] as Draft[], quarantined: [] as string[] };
       }),
+      storeKeys('session-').then((keys) => keys.filter((k) => k !== SESSION_KEY)),
+      storeKeys('closed-').then((keys) => keys.filter((k) => k !== CLOSED_KEY)),
     ]);
+    // Windows that were open alongside this one last time: their tabs come back here too.
+    const [otherSessions, otherClosed] = await Promise.all([
+      Promise.all(otherSessionKeys.map((k) => storeGet<Session>(k))),
+      Promise.all(otherClosedKeys.map((k) => storeGet<ClosedTab[]>(k))),
+    ]);
+    const closed = [ownClosed, ...otherClosed]
+      .flatMap((list) => (Array.isArray(list) ? list : []))
+      .sort((a, b) => (a?.closedAt ?? 0) - (b?.closedAt ?? 0));
     const session = rawSession && typeof rawSession === 'object' ? rawSession : null;
     kindOverrides = kinds && typeof kinds === 'object' && !Array.isArray(kinds) ? kinds : {};
     const cutoff = Date.now() - CLOSED_DAYS * 864e5;
@@ -806,13 +871,14 @@ export const useApp = create<AppStore>((set, get) => ({
     const drafts = new Map(cleaned.filter((d): d is Draft => !!d).map((d) => [d.id, d]));
     drafts.forEach((_d, id) => onDisk.add(id));
     const restore = useSettings.getState().settings.restoreSession;
-    const tabs: SessionTab[] = (
-      session?.version === 2 && Array.isArray(session.tabs)
+    const tabs: SessionTab[] = [
+      ...(session?.version === 2 && Array.isArray(session.tabs)
         ? session.tabs.map(cleanTab)
         : (Array.isArray(session?.open) ? session.open : [])
             .filter((o) => o && typeof o.path === 'string')
-            .map((o) => cleanTab({ id: newId(), path: o.path, mode: o.mode, kind: kindFor(o.path), scroll: o.scroll }))
-    ).filter((t): t is SessionTab => !!t);
+            .map((o) => cleanTab({ id: newId(), path: o.path, mode: o.mode, kind: kindFor(o.path), scroll: o.scroll }))),
+      ...otherSessions.flatMap((other) => (other?.version === 2 && Array.isArray(other.tabs) ? other.tabs.map(cleanTab) : [])),
+    ].filter((t, i, all): t is SessionTab => !!t && all.findIndex((x) => x?.id === t.id) === i);
 
     // Which tabs come back: listed tabs (all of them, or only those with unsaved text when
     // "restore session" is off), then drafts the session doesn't list (a crash between
@@ -832,7 +898,7 @@ export const useApp = create<AppStore>((set, get) => ({
           name: draft.name,
           mode: asMode(draft.mode, 'edit'),
           kind: asKind(draft.kind, 'markdown'),
-          scroll: 0,
+          scroll: draft.scroll ?? 0,
           encoding: draft.diskEncoding ?? draft.encoding ?? 'UTF-8',
         },
       });
@@ -863,6 +929,8 @@ export const useApp = create<AppStore>((set, get) => ({
       docs[docs.length - 1]?.id ??
       null;
     set({ docs, activeId, ready: true });
+    // This window now holds these files; another window opening one of them shows it here.
+    for (const d of docs) if (d.path) void claimPath(d.path);
 
     // From here on, every change reaches disk on its own.
     docs.forEach((d) => {
@@ -877,7 +945,11 @@ export const useApp = create<AppStore>((set, get) => ({
       });
     }
     startDraftSync();
-    if (!session || session.version !== 2) void persistSession();
+    if (!session || session.version !== 2 || otherSessionKeys.length) void persistSession(true).then(() => {
+      // The other windows' lists live in this window's now.
+      otherSessionKeys.forEach((k) => void storeDelete(k));
+    });
+    if (otherClosedKeys.length) void persistClosed().then(() => otherClosedKeys.forEach((k) => void storeDelete(k))).catch(() => undefined);
 
     for (const id of conflicts) {
       const d = get().docs.find((x) => x.id === id);
@@ -919,9 +991,18 @@ export const useApp = create<AppStore>((set, get) => ({
         lastId = existing.id;
         continue;
       }
+      // One window per file: if another window has it open, show it there.
+      const owner = await claimPath(path);
+      if (owner) {
+        void focusPathIn(owner, path).catch(() => undefined);
+        continue;
+      }
       try {
         const f = await readForOpen(path, opts?.force);
-        if (!f) continue;
+        if (!f) {
+          void releasePath(path);
+          continue;
+        }
         flushEditors();
         const alreadyOpen = get().docs.find((d) => d.path && samePath(d.path, f.path));
         if (alreadyOpen) {
@@ -982,7 +1063,10 @@ export const useApp = create<AppStore>((set, get) => ({
     const doc = docs[idx];
     const next = docs.filter((d) => d.id !== id);
     // Only unwatch when no other tab shows the same file.
-    if (doc.path && !next.some((d) => d.path && samePath(d.path, doc.path as string))) void unwatchFile(doc.path);
+    if (doc.path && !next.some((d) => d.path && samePath(d.path, doc.path as string))) {
+      void unwatchFile(doc.path);
+      void releasePath(doc.path);
+    }
     const keepText = !doc.path || isDirty(doc);
     const worthKeeping = !doc.transient && (!!doc.path || doc.content.trim() !== '');
     const record: ClosedTab | null = worthKeeping
@@ -1064,6 +1148,18 @@ export const useApp = create<AppStore>((set, get) => ({
       void persistSession();
       return;
     }
+    const owner = !open && last.path ? await claimPath(last.path) : null;
+    if (owner && last.path) {
+      // The file is open in another window: never a second writable tab for it.
+      if (last.content !== undefined) {
+        const copy = recoveredCopy(last.name, last.content, last.kind, last.mode);
+        set((s) => ({ docs: [...s.docs, copy], activeId: copy.id }));
+        toast.info(`${last.name} is open in another window`, 'Your closed version opened here as a separate note.');
+      } else void focusPathIn(owner, last.path).catch(() => undefined);
+      done();
+      void persistSession();
+      return;
+    }
     if (last.content === undefined && last.path) {
       await get().openPaths([last.path]);
       if (get().docs.some((d) => d.path && samePath(d.path, last.path as string))) done();
@@ -1091,6 +1187,83 @@ export const useApp = create<AppStore>((set, get) => ({
     set((s) => ({ docs: [...s.docs, doc], activeId: doc.id }));
     done();
     void persistSession();
+  },
+
+  async detachDoc(id) {
+    flushEditors();
+    const doc = get().docs.find((d) => d.id === id);
+    if (!doc) return false;
+    // Nothing else may write or delete this tab's draft from here on.
+    const p = pending.get(id);
+    if (p) clearTimeout(p.timer);
+    pending.delete(id);
+    clearTimeout(autosaveTimers.get(id));
+    autosaveTimers.delete(id);
+    seen.delete(id);
+    // The draft carries everything the other window needs, saved or not.
+    await chain(id, () => draftWrite(toDraft(doc)));
+    if (failedDrafts.has(id)) {
+      seen.set(id, snapshotOf(doc));
+      toast.error("Couldn't move the tab", 'Its text stays here.');
+      return false;
+    }
+    failedDrafts.delete(id);
+    onDisk.delete(id);
+    savedHashes.delete(id);
+    const { docs, activeId } = get();
+    const idx = docs.findIndex((d) => d.id === id);
+    const next = docs.filter((d) => d.id !== id);
+    set({ docs: next, activeId: activeId === id ? (next[idx] ?? next[idx - 1] ?? null)?.id ?? null : activeId });
+    if (doc.path && !next.some((d) => d.path && samePath(d.path, doc.path as string))) {
+      void unwatchFile(doc.path);
+      await releasePath(doc.path);
+    }
+    await persistSession(true).catch(() => undefined);
+    return true;
+  },
+
+  async adoptDoc(id, index) {
+    if (get().docs.some((d) => d.id === id)) return true;
+    const draft = cleanDraft(await draftRead(id).catch(() => null));
+    if (!draft) {
+      toast.error("Couldn't move the tab", 'Its text is safe in the drafts folder and comes back the next time Margin starts.');
+      return false;
+    }
+    const tab: SessionTab = {
+      id,
+      path: draft.path,
+      name: draft.name,
+      mode: asMode(draft.mode, 'edit'),
+      kind: asKind(draft.kind, 'markdown'),
+      scroll: draft.scroll ?? 0,
+      encoding: draft.diskEncoding ?? draft.encoding ?? 'UTF-8',
+      eol: draft.eol,
+    };
+    const owner = draft.path ? await claimPath(draft.path) : null;
+    const conflicts: string[] = [];
+    // If another window opened the file meanwhile, this text comes in as a separate note.
+    const doc = owner
+      ? recoveredCopy(draft.name, draft.content, tab.kind, tab.mode, id)
+      : await restoreTab(tab, draft, conflicts).catch(() => recoveredCopy(draft.name, draft.content, tab.kind, tab.mode, id));
+    if (!doc) return false;
+    set((s) => {
+      const docs = [...s.docs];
+      const at = index === undefined ? docs.length : Math.max(0, Math.min(index, docs.length));
+      docs.splice(at, 0, doc);
+      return { docs, activeId: doc.id };
+    });
+    onDisk.add(id);
+    seen.set(id, snapshotOf(doc));
+    // A saved file needs no draft: the one used for the move is removed.
+    if (!needsDraft(doc)) scheduleDraft(id);
+    void persistSession();
+    for (const c of conflicts) conflictToast(c, `${doc.name} changed on disk`, 'Your unsaved version is showing.');
+    return true;
+  },
+
+  activatePath(path) {
+    const doc = get().docs.find((d) => d.path && samePath(d.path, path));
+    if (doc) get().activate(doc.id);
   },
 
   clearClosed() {
@@ -1284,6 +1457,11 @@ export const useApp = create<AppStore>((set, get) => ({
       flushEditors();
       const snapshot = get().docs.find((d) => d.id === doc.id);
       if (!snapshot) return false;
+      const owner = snapshot.path && samePath(snapshot.path, path) ? null : await claimPath(path);
+      if (owner) {
+        toast.warn('That file is open in another window', 'Choose a different name or save from that window.');
+        return false;
+      }
       if (get().docs.some((d) => d.id !== doc.id && d.path && samePath(d.path, path))) {
         toast.warn('That file is already open', 'Choose a different name or save from its open tab.');
         return false;
@@ -1306,7 +1484,10 @@ export const useApp = create<AppStore>((set, get) => ({
       if (!isTauri) downloadText(baseName(path), text, snapshot.kind === 'text' ? 'text/plain' : 'text/markdown');
       flushEditors();
       if (get().docs.some((d) => d.id === doc.id)) {
-        if (snapshot.path && !samePath(snapshot.path, path)) void unwatchFile(snapshot.path);
+        if (snapshot.path && !samePath(snapshot.path, path)) {
+          void unwatchFile(snapshot.path);
+          void releasePath(snapshot.path);
+        }
         void watchFile(path);
       }
       const relinked = source !== snapshot;

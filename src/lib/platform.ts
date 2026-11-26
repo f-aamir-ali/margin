@@ -49,6 +49,8 @@ export interface Draft {
   bom: boolean;
   diskEncoding?: string;
   eol?: Eol;
+  /** Scroll position, so a tab moved to another window opens where it was. */
+  scroll?: number;
   updatedAt: number;
 }
 
@@ -479,6 +481,32 @@ export async function storeSet(key: string, value: unknown, strict = false): Pro
   }
 }
 
+/** Keys starting with `prefix` (the per-window sessions: `session-w1`…). */
+export async function storeKeys(prefix: string): Promise<string[]> {
+  if (isTauri) return invoke<string[]>('store_keys', { prefix }).catch(() => [] as string[]);
+  const out: string[] = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(webStoreKey(prefix))) out.push(key.slice(webStoreKey('').length));
+    }
+  } catch {
+    /* no storage here (tests, private windows) */
+  }
+  return out.sort();
+}
+
+export async function storeDelete(key: string): Promise<void> {
+  if (isTauri) await invoke<void>('store_delete', { key }).catch(() => undefined);
+  else {
+    try {
+      localStorage.removeItem(webStoreKey(key));
+    } catch {
+      /* no storage here */
+    }
+  }
+}
+
 /* ---------- drafts (hot exit) ---------- */
 
 const DRAFT_PREFIX = 'mdv:draft:';
@@ -491,6 +519,13 @@ export async function draftWrite(draft: Draft): Promise<void> {
 export async function draftDelete(id: string): Promise<void> {
   if (isTauri) return invoke<void>('draft_delete', { id });
   localStorage.removeItem(DRAFT_PREFIX + id);
+}
+
+/** One draft by id, or null (a tab handed to another window reads its text here). */
+export async function draftRead(id: string): Promise<Draft | null> {
+  if (isTauri) return invoke<Draft | null>('draft_read', { id });
+  const raw = localStorage.getItem(DRAFT_PREFIX + id);
+  return raw ? (JSON.parse(raw) as Draft) : null;
 }
 
 export async function draftList(): Promise<{ drafts: Draft[]; quarantined: string[] }> {
@@ -506,6 +541,77 @@ export async function draftList(): Promise<{ drafts: Draft[]; quarantined: strin
     }
   }
   return { drafts, quarantined: [] };
+}
+
+/* ---------- windows (tabs can be torn off into their own window, like Chrome) ---------- */
+
+/** This window's label: `main` for the first window, `w1`, `w2`… for torn-off tab windows. */
+export const windowLabel: string =
+  (typeof window !== 'undefined' &&
+    (window as unknown as { __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } } }).__TAURI_INTERNALS__
+      ?.metadata?.currentWindow?.label) ||
+  'main';
+
+/** Draft ids a torn-off window was opened with (`?adopt=id1,id2`). */
+export function adoptedIds(): string[] {
+  if (typeof location === 'undefined') return [];
+  return (new URLSearchParams(location.search).get('adopt') ?? '').split(',').filter((id) => /^[a-z0-9_-]+$/.test(id));
+}
+
+/** True for the one window per process that restores the saved session (every window's tabs). */
+export async function claimRestore(): Promise<boolean> {
+  return isTauri ? invoke<boolean>('claim_restore') : true;
+}
+
+/** Marks a file as open in this window. Returns the label of another window that has it open, or null. */
+export async function claimPath(path: string): Promise<string | null> {
+  if (!isTauri) return null;
+  return invoke<string | null>('claim_path', { path }).catch(() => null);
+}
+
+export async function releasePath(path: string): Promise<void> {
+  if (isTauri) await invoke<void>('release_path', { path }).catch(() => undefined);
+}
+
+/** Brings another window to the front and shows its tab for `path`. */
+export async function focusPathIn(label: string, path: string): Promise<void> {
+  if (isTauri) await invoke<void>('focus_path_in', { label, path });
+}
+
+/** Opens a window for torn-off tabs with its top-left corner at physical screen (x, y). Returns its label. */
+export async function openTabWindow(adopt: string[], x: number, y: number): Promise<string> {
+  return invoke<string>('open_tab_window', { adopt, x, y });
+}
+
+export async function moveWindow(label: string, x: number, y: number): Promise<void> {
+  if (isTauri) await invoke<void>('move_window', { label, x, y });
+}
+
+/** The window whose tab bar is at physical screen (x, y), skipping `exclude`. */
+export async function tabDropTarget(x: number, y: number, exclude: string[]): Promise<{ label: string; clientX: number } | null> {
+  if (!isTauri) return null;
+  return invoke<{ label: string; clientX: number } | null>('tab_drop_target', { x, y, exclude }).catch(() => null);
+}
+
+/** Sends an event to one window. */
+export async function emitToWindow(label: string, event: string, payload?: unknown): Promise<void> {
+  if (!isTauri) return;
+  const { emitTo } = await import('@tauri-apps/api/event');
+  await emitTo(label, event, payload);
+}
+
+/** Sends an event to every window, this one included. */
+export async function emitToAll(event: string, payload?: unknown): Promise<void> {
+  if (!isTauri) return;
+  const { emit } = await import('@tauri-apps/api/event');
+  await emit(event, payload);
+}
+
+/** Listens for an event sent to this window (or to every window). */
+export async function onWindowEvent<T>(event: string, cb: (payload: T) => void): Promise<Unlisten> {
+  if (!isTauri) return () => undefined;
+  const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+  return getCurrentWebviewWindow().listen<T>(event, (e) => cb(e.payload));
 }
 
 /* ---------- shell ---------- */
@@ -552,6 +658,10 @@ export const appWindow = {
     const w = await win();
     await w.show();
     await w.setFocus();
+  },
+  /** Shows the window without taking focus (a torn-off window while its tab is still being dragged). */
+  async reveal() {
+    if (isTauri) await (await win()).show();
   },
   async minimize() {
     if (isTauri) await (await win()).minimize();

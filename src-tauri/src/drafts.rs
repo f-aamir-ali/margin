@@ -46,6 +46,22 @@ pub async fn draft_list(app: AppHandle) -> Result<DraftList, String> {
     blocking(move || draft_list_sync(&dir)).await
 }
 
+/// One draft, or null when there is none (a tab handed to another window reads its text here).
+#[tauri::command]
+pub async fn draft_read(app: AppHandle, id: String) -> Result<Option<Value>, String> {
+    let dir = drafts_dir(&app)?;
+    blocking(move || {
+        validate_key(&id)?;
+        let file = dir.join(format!("{id}.json"));
+        match fs::read_to_string(&file) {
+            Ok(text) => Ok(serde_json::from_str::<Value>(&text).ok().filter(|v| is_valid_draft(v, &id))),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(io_message("read", &file, &err)),
+        }
+    })
+    .await
+}
+
 fn draft_write_sync(dir: &Path, id: &str, value: &Value) -> Result<(), String> {
     validate_key(id)?;
     fs::create_dir_all(dir).map_err(|err| io_message("create", dir, &err))?;
